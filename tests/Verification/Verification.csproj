@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/DXSharp.Houdini.Engine/DXSharp.Houdini.Engine.csproj" />
+    <ProjectReference Include="../../src/DXSharp.Houdini.Geometry/DXSharp.Houdini.Geometry.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,15 @@
+**/bin/
+**/obj/
+artifacts/
+build/
+.vs/
+.idea/
+*.user
+*.suo
+*.hip
+*.hiplc
+*.hipnc
+*.dll
+*.so
+*.dylib
+CMakeUserPresets.json

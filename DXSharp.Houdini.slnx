@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DXSharp.Houdini.Interop/DXSharp.Houdini.Interop.csproj" />
+    <Project Path="src/DXSharp.Houdini.Engine/DXSharp.Houdini.Engine.csproj" />
+    <Project Path="src/DXSharp.Houdini.Geometry/DXSharp.Houdini.Geometry.csproj" />
+    <Project Path="src/DXSharp.Houdini/DXSharp.Houdini.csproj" />
+  </Folder>
+  <Folder Name="/samples/"><Project Path="samples/Diagnostics/Diagnostics.csproj" /></Folder>
+  <Folder Name="/tests/"><Project Path="tests/Verification/Verification.csproj" /></Folder>
+</Solution>
