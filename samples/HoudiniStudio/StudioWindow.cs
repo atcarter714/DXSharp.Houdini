@@ -106,8 +106,8 @@ internal sealed class StudioWindow : Window {
         string network=Network??"/obj";
         string category=_sceneEntries.TryGetValue(network,out var entry)?entry.ChildCategory:"";
         _context.Text=(string.IsNullOrEmpty(category)?"Network":category)+" · "+network;
-        if(_nodes.SelectedNode?.Content is SceneEntry node && node.Inputs?.Length>0)
-            _context.Text+="\nInputs: "+string.Join(", ",node.Inputs.Select(x=>x.Split('/').Last()));
+        if(_nodes.SelectedNode?.Content is SceneEntry { Inputs: { Length: >0 } inputs })
+            _context.Text+="\nInputs: "+string.Join(", ",inputs.Select(x=>x.Split('/').Last()));
     }
     private void SelectPath(string? path) {
         if(path!=null && _treeNodes.TryGetValue(path,out var node)) {
@@ -213,6 +213,7 @@ internal sealed class StudioWindow : Window {
         var parmTools=new StackPanel { Orientation=Orientation.Horizontal, Spacing=6 };
         parmTools.Children.Add(Button("Refresh", InspectAsync));
         parmTools.Children.Add(Button("Sync edits", FlushEditsAsync));
+        parmTools.Children.Add(Button("Discard", async()=>{if(Selected is string path){foreach(var key in _pending.Keys.Where(k=>k.Path==path).ToArray())_pending.Remove(key);await InspectAsync();}}));
         inspector.Children.Add(parmTools);
         inspector.Children.Add(_autoApply);
         inspector.Children.Add(_parameters);
@@ -500,7 +501,7 @@ internal sealed class StudioWindow : Window {
         int unsupported = data.TryGetProperty("unsupported", out var skipped) ? skipped.GetInt32() : 0;
         _status.Text = $"{path} | {sourcePoints:N0} source points | {data.GetProperty("primitives").GetInt32():N0} primitives | {_edges.Length:N0} preview edges | Cook {_revision}" +
             (unsupported > 0 ? $" | {unsupported} unsupported primitives" : "");
-        if(!rebuildParameters) return;
+        if(!rebuildParameters || _pending.Keys.Any(k=>k.Path==path)) return;
         var parms = await Request(new { action = "tuples", path });
         if (Selected != path) return;
         _parameters.Children.Clear();
@@ -578,7 +579,7 @@ internal sealed class StudioWindow : Window {
         string? baseline=null;
         try { baseline=JsonSerializer.Serialize(Payload()); } catch(Exception) { }
         void MarkDirty() {
-            if(Selected!=path) return;
+            if(Selected!=path || _previewPath!=path) return;
             try { var payload=Payload(); if(JsonSerializer.Serialize(payload)==baseline && !_pending.ContainsKey((path,name))) return; _pending[(path,name)]=payload; _lastEdit=DateTime.UtcNow; }
             catch(Exception ex) { _status.Text=ex.Message; }
         }
