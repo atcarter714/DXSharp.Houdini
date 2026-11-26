@@ -224,7 +224,29 @@ internal sealed class StudioWindow : Window {
     }
 
     private Button Button(string label, Func<Task> action) {
-        var b = new Button { Content = label, Background = Brush(38,64,80), Foreground = Brush(226,245,249), CornerRadius = new CornerRadius(5), Padding = new Thickness(10,6,10,6) };
+        string plain=label.TrimStart('＋','↓','↻','…','◎','⇄','✓',' ');
+        string glyph=plain switch {
+            "Discover" or "Load operator catalog" => "\uE721",
+            "Connect" => "\uE8A7",
+            "Refresh nodes" or "Cook" or "Read attributes" or "Read geometry / parameters" => "\uE72C",
+            "Add operator" => "\uE710",
+            "Install selected HDA" or "Install HDA file" or "Import BGEO" => "\uE8B5",
+            "Export BGEO" => "\uE74E",
+            "Browse" => "\uE838",
+            "Frame" => "\uE739",
+            "Match view" => "\uE895",
+            "Apply" => "\uE73E",
+            "box" => "\uE7B8",
+            "sphere" => "\uE909",
+            "torus" => "\uE91F",
+            _ => ""
+        };
+        var content=new StackPanel { Orientation=Orientation.Horizontal, Spacing=6 };
+        if(glyph.Length>0) content.Children.Add(new FontIcon { Glyph=glyph, FontFamily=new FontFamily("Segoe MDL2 Assets"), FontSize=15 });
+        content.Children.Add(new TextBlock { Text=plain, VerticalAlignment=VerticalAlignment.Center });
+        var b = new Button { Content = content, Background = Brush(38,64,80), Foreground = Brush(226,245,249), CornerRadius = new CornerRadius(5), Padding = new Thickness(10,6,10,6) };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(b,plain);
+        ToolTipService.SetToolTip(b,plain);
         b.Click += async (_, _) => await RunAsync(action);
         return b;
     }
