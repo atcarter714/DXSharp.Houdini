@@ -31,3 +31,25 @@ Check( CanonicalAttributes.ConvertFloatStream("uv",3,[.2f,.4f,0f]).SequenceEqual
 Check( CanonicalAttributes.ElementIndex(AttributeDomain.Vertex,5,17,3)==17, "Corner domain" );
 Throws<ArgumentException>( ()=>CanonicalAttributes.ConvertFloatStream("P",3,[1f,2f]) );
 Console.WriteLine("PASS: canonical attribute contracts.");
+
+var sourceMesh=new MeshTopology([Vector3.Zero,Vector3.UnitX,Vector3.UnitY,Vector3.One],[0,1,2,2,1,3],[3,3]);
+var compiled=GeometryProcessor.Compile(sourceMesh,[
+    new("Cd",AttributeDomain.Detail,3,[.2f,.4f,.6f]),
+    new("uv",AttributeDomain.Vertex,2,[0,0,1,0,0,1,.5f,.5f,1,0,1,1])
+],["A","B"]);
+Check(compiled.Vertices.Length==5&&compiled.Ranges.Length==2,"Corner seam / material ranges.");
+Check(compiled.Vertices.All(v=>v.Color==new Vector4(.2f,.4f,.6f,1)),"Detail color.");
+string blob=Path.Combine(Path.GetTempPath(),Guid.NewGuid()+".dxam");
+try {
+    MeshBlob.Write(blob,compiled);
+    var restored=MeshBlob.Read(blob);
+    Check(restored.Vertices.SequenceEqual(compiled.Vertices)&&restored.Indices.SequenceEqual(compiled.Indices)&&restored.Ranges.SequenceEqual(compiled.Ranges),"Binary round trip.");
+    using(var stream=File.OpenWrite(blob)){stream.Position=32;stream.WriteByte(123);}
+    Throws<InvalidDataException>(()=>MeshBlob.Read(blob));
+} finally {File.Delete(blob);}
+var material=MaterialProcessor.Translate(new("/mat/rock","UsdPreviewSurface",new() {
+    ["diffuseColor"]=new([.2f,.3f,.4f],new("rock.png","C:/textures/rock.png","sRGB")),
+    ["roughness"]=new([.6f]),["metallic"]=new([.1f]),["normal"]=new(UnsupportedConnection:"procedural graph")
+}));
+Check(material.Textures.ContainsKey("baseColor")&&material.Roughness==.6f&&material.Diagnostics.Length==1,"Material translation.");
+Console.WriteLine("PASS: seam expansion, material translation and DXAM round trip/checksum.");
