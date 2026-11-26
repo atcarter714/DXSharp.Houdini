@@ -3,6 +3,7 @@ param(
     [ValidateSet('Debug','Release')][string]$Configuration = 'Release',
     [string]$HoudiniRoot,
     [switch]$Native,
+    [switch]$HydraProbe,
     [switch]$Locked
 )
 $ErrorActionPreference = 'Stop'
@@ -15,7 +16,7 @@ try {
     & dotnet @restoreArgs
     dotnet build DXSharp.Houdini.slnx -c $Configuration --no-restore
     dotnet run --project tests/Verification -c $Configuration --no-build
-    if ($Native) {
+    if ($Native -or $HydraProbe) {
         if (-not $HoudiniRoot) { $HoudiniRoot = $env:DXSHARP_HOUDINI_ROOT }
         if (-not $HoudiniRoot) { $HoudiniRoot = $env:HFS }
         if (-not $HoudiniRoot) { $HoudiniRoot = Join-Path $env:ProgramFiles 'Side Effects Software/Houdini 22.0.514' }
@@ -32,12 +33,18 @@ try {
             }
         }
         if (-not $cmake) { throw 'CMake not found. Install the Visual Studio C++ CMake tools component or CMake and add it to PATH.' }
-        & $cmake -S . -B artifacts/native -A x64 "-DHoudini_DIR=$configDir"
+        $hydra = if ($HydraProbe) { "ON" } else { "OFF" }
+        & $cmake -S . -B artifacts/native -A x64 "-DHoudini_DIR=$configDir" "-DDXSHARP_HYDRA_PROBE=$hydra"
         & $cmake --build artifacts/native --config $Configuration
         $probe = Get-ChildItem artifacts/native -Recurse -Filter hapi_abi_probe.exe | Where-Object { $_.Directory.Name -eq $Configuration } | Select-Object -First 1
         if (-not $probe) { throw 'Native ABI probe not found.' }
         & $probe.FullName | Tee-Object -FilePath artifacts/hapi-abi.json
         dotnet run --project samples/Diagnostics -c $Configuration --no-build -- --root $HoudiniRoot
+        if ($HydraProbe) {
+            $h = Get-ChildItem artifacts/native -Recurse -Filter hydra_abi_probe.exe | Where-Object { $_.Directory.Name -eq $Configuration } | Select-Object -First 1
+            if (-not $h) { throw "Hydra ABI probe not found." }
+            & $h.FullName | Tee-Object -FilePath artifacts/hydra-abi.json
+        }
     }
 }
 finally { Pop-Location }
