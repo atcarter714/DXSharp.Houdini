@@ -14,6 +14,24 @@ internal sealed class StudioWindow : Window {
         public override string ToString() => $"Houdini {Version} · PID {Pid} · {System.IO.Path.GetFileName(Scene)}";
     }
     private readonly ComboBox _sessions = new() { PlaceholderText = "Discover Houdini sessions", MinWidth = 220 };
+    private readonly PreviewRasterizer _raster = new();
+    private readonly Image _preview = new() { Stretch = Stretch.Fill, IsHitTestVisible = false };
+    private readonly ComboBox _shading = new() { ItemsSource = new[] { "Wireframe", "Shaded", "Shaded + edges" }, SelectedIndex = 2, MinWidth = 140 };
+    private readonly ComboBox _operators = new() { PlaceholderText = "Select SOP operator", MaxWidth = 245 };
+    private readonly TextBox _operatorFilter = new() { PlaceholderText = "Search operator types..." };
+    private readonly ComboBox _tools = new() { PlaceholderText = "SideFX HDA tools", MaxWidth = 245 };
+    private readonly TextBlock _attributeText = new() { TextWrapping = TextWrapping.Wrap, FontFamily = new FontFamily("Consolas"), FontSize = 12 };
+    private readonly List<OperatorEntry> _operatorList = [];
+    private int[] _triangles = [];
+    private Matrix4x4? _syncedRotation;
+    private bool _drawPending;
+    private sealed record OperatorEntry(string Name, string Label, int Inputs) {
+        public override string ToString() => $"{Label} · {Name}";
+    }
+    private sealed record ToolEntry(string Name, string File) {
+        public override string ToString() => Name;
+    }
+    private static SolidColorBrush Brush(byte r, byte g, byte b) => new(ColorHelper.FromArgb(255,r,g,b));
     private readonly TextBox _filter = new() { PlaceholderText = "Filter SOP paths..." };
     private readonly TextBox _file = new() { PlaceholderText = "Absolute .bgeo or .bgeo.sc path", MinWidth = 280 };
     private readonly ToggleSwitch _live = new() { Header = "Live update", IsOn = true };
@@ -42,17 +60,19 @@ internal sealed class StudioWindow : Window {
 
     public StudioWindow() {
         Title = "DXSharp Houdini Studio | Live SOP Explorer";
-        var root = new Grid { Padding = new Thickness(16), RowSpacing = 10, ColumnSpacing = 12 };
+        var root = new Grid { Padding = new Thickness(12), RowSpacing = 10, ColumnSpacing = 10, Background = Brush(15,22,32), RequestedTheme = ElementTheme.Dark };
         root.RowDefinitions.Add(new() { Height = GridLength.Auto });
         root.RowDefinitions.Add(new() { Height = new GridLength(1, GridUnitType.Star) });
         root.RowDefinitions.Add(new() { Height = GridLength.Auto });
-        root.ColumnDefinitions.Add(new() { Width = new GridLength(270) });
+        root.ColumnDefinitions.Add(new() { Width = new GridLength(285) });
         root.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
-        root.ColumnDefinitions.Add(new() { Width = new GridLength(280) });
+        root.ColumnDefinitions.Add(new() { Width = new GridLength(330) });
         var header = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        header.Children.Add(new TextBlock { Text = "DXSHARP / HOUDINI", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = Brush(105,207,219), VerticalAlignment = VerticalAlignment.Center, FontSize = 16 });
         header.Children.Add(_sessions);
         header.Children.Add(Button("Discover", DiscoverAsync));
-        header.Children.Add(_directory);
+        var advanced = new Flyout { Content = _directory };
+        header.Children.Add(new Button { Content = "⚙", Flyout = advanced });
         _sessions.SelectionChanged += (_, _) => {
             if (_sessions.SelectedItem is SessionEntry session) _directory.Text = session.Directory;
         };
@@ -67,20 +87,33 @@ internal sealed class StudioWindow : Window {
         foreach (string kind in new[] {"box", "sphere", "torus"})
             create.Children.Add(Button(kind, () => CreateAsync(kind)));
         _controls.Children.Add(create);
+        _controls.Children.Add(new TextBlock { Text = "OPERATOR LIBRARY", Foreground = Brush(104,196,207), FontSize = 12 });
+        _controls.Children.Add(_operatorFilter);
+        _operatorFilter.TextChanged += (_, _) => FilterOperators();
+        _controls.Children.Add(_operators);
+        _controls.Children.Add(Button("＋ Add operator", AddOperatorAsync));
+        _controls.Children.Add(_tools);
+        _controls.Children.Add(Button("↓ Install selected HDA", InstallToolAsync));
+        _controls.Children.Add(Button("↻ Load operator catalog", LoadCatalogAsync));
         var left = new Grid { RowSpacing = 8 };
         left.RowDefinitions.Add(new() { Height = GridLength.Auto });
         left.RowDefinitions.Add(new() { Height = new GridLength(1, GridUnitType.Star) });
         left.Children.Add(_controls);
         Grid.SetRow(_nodes, 1); left.Children.Add(_nodes);
-        Grid.SetRow(left, 1); root.Children.Add(left);
+        var leftPanel = new Border { Background = Brush(25,35,47), CornerRadius = new CornerRadius(8), Child = left, Padding = new Thickness(10) };
+        Grid.SetRow(leftPanel, 1); root.Children.Add(leftPanel);
         var center = new Grid { RowSpacing = 8 };
         center.RowDefinitions.Add(new() { Height = new GridLength(1, GridUnitType.Star) });
         center.RowDefinitions.Add(new() { Height = GridLength.Auto });
+        _viewport.Children.Add(_preview);
         center.Children.Add(_viewport);
         var camera = new StackPanel { Spacing = 4 };
         var tools = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-        tools.Children.Add(Button("Frame", () => { _panX = _panY = 0; _zoom.Value = 1; Draw(); return Task.CompletedTask; }));
-        tools.Children.Add(Button("Recook", RecookAsync));
+        tools.Children.Add(_shading);
+        _shading.SelectionChanged += (_, _) => Draw();
+        tools.Children.Add(Button("◎ Frame", () => { _panX = _panY = 0; _zoom.Value = 1; Draw(); return Task.CompletedTask; }));
+        tools.Children.Add(Button("↻ Cook", RecookAsync));
+        tools.Children.Add(Button("⇄ Match view", MatchViewAsync));
         tools.Children.Add(_live);
         camera.Children.Add(tools);
         camera.Children.Add(new TextBlock { Text = "Left drag: orbit   |   Middle/right drag: pan   |   Wheel: zoom" });
@@ -96,7 +129,14 @@ internal sealed class StudioWindow : Window {
         inspector.Children.Add(Button("Read geometry / parameters", InspectAsync));
         inspector.Children.Add(_parameters);
         var scroll = new ScrollViewer { Content = inspector };
-        Grid.SetColumn(scroll, 2); Grid.SetRow(scroll, 1); root.Children.Add(scroll);
+        var tabs = new Pivot();
+        tabs.Items.Add(new PivotItem { Header = "Parameters", Content = scroll });
+        var attrs = new StackPanel { Spacing = 8, Padding = new Thickness(8) };
+        attrs.Children.Add(Button("↻ Read attributes", ReadAttributesAsync));
+        attrs.Children.Add(_attributeText);
+        tabs.Items.Add(new PivotItem { Header = "Attributes", Content = new ScrollViewer { Content = attrs } });
+        var rightPanel = new Border { Background = Brush(25,35,47), CornerRadius = new CornerRadius(8), Child = tabs, Padding = new Thickness(6) };
+        Grid.SetColumn(rightPanel, 2); Grid.SetRow(rightPanel, 1); root.Children.Add(rightPanel);
         Grid.SetRow(_status, 2); Grid.SetColumnSpan(_status, 3); root.Children.Add(_status);
         Content = root;
         _viewport.SizeChanged += (_, _) => Draw();
@@ -118,6 +158,7 @@ internal sealed class StudioWindow : Window {
             _drag = p;
             if (_panDrag) { _panX += dx; _panY += dy; Draw(); }
             else {
+                _syncedRotation = null;
                 _yaw.Value = ((_yaw.Value + dx * .5 + 180) % 360 + 360) % 360 - 180;
                 _pitch.Value = Math.Clamp(_pitch.Value + dy * .5, -89, 89);
             }
@@ -141,7 +182,7 @@ internal sealed class StudioWindow : Window {
     }
 
     private Button Button(string label, Func<Task> action) {
-        var b = new Button { Content = label };
+        var b = new Button { Content = label, Background = Brush(38,64,80), Foreground = Brush(226,245,249), CornerRadius = new CornerRadius(5), Padding = new Thickness(10,6,10,6) };
         b.Click += async (_, _) => await RunAsync(action);
         return b;
     }
@@ -199,7 +240,9 @@ internal sealed class StudioWindow : Window {
     }
     private async Task CheckRevisionAsync() {
         string path = Selected!;
-        if (_parameters.Children.OfType<Grid>().Any(g => g.Children.OfType<TextBox>().Any(t => t.FocusState != FocusState.Unfocused))) return;
+        if (_parameters.XamlRoot is not null && Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(_parameters.XamlRoot) is DependencyObject focused) {
+            for (DependencyObject? parent=focused;parent!=null;parent=VisualTreeHelper.GetParent(parent)) if (ReferenceEquals(parent,_parameters)) return;
+        }
         var result = await Request(new { action = "revision", path });
         if (Selected == path && (_previewPath != path || _revision != result.GetProperty("cook").GetInt32()))
             await InspectAsync();
@@ -241,66 +284,136 @@ internal sealed class StudioWindow : Window {
         _previewPath = path;
         _points = data.GetProperty("positions").EnumerateArray().Select(p =>
             new Vector3(p[0].GetSingle(), p[1].GetSingle(), p[2].GetSingle())).ToArray();
+        _triangles = data.TryGetProperty("triangles", out var triangles) ? triangles.EnumerateArray().Select(x => x.GetInt32()).ToArray() : [];
         _edges = data.GetProperty("edges").EnumerateArray().Select(e => (e[0].GetInt32(), e[1].GetInt32())).ToArray();
         Draw();
         int sourcePoints = data.TryGetProperty("sourcePoints", out var source) ? source.GetInt32() : _points.Length;
         int unsupported = data.TryGetProperty("unsupported", out var skipped) ? skipped.GetInt32() : 0;
         _status.Text = $"{path} | {sourcePoints:N0} source points | {data.GetProperty("primitives").GetInt32():N0} primitives | {_edges.Length:N0} preview edges | Cook {_revision}" +
             (unsupported > 0 ? $" | {unsupported} unsupported primitives" : "");
-        var parms = await Request(new { action = "parameters", path });
+        var parms = await Request(new { action = "tuples", path });
         if (Selected != path) return;
         _parameters.Children.Clear();
-        foreach (var p in parms.EnumerateArray()) {
-            string name = p.GetProperty("name").GetString()!;
-            string label = p.GetProperty("label").GetString()!;
-            bool integer = p.GetProperty("integer").GetBoolean();
-            var input = new TextBox { Header = $"{label} ({name})", Text = p.GetProperty("value").GetDouble().ToString("G", CultureInfo.InvariantCulture) };
-            var field = new Grid { ColumnSpacing = 6 };
-            field.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
-            field.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
-            field.Children.Add(input);
-            var apply = Button("Apply", async () => {
-                if (Selected != path) throw new InvalidOperationException("Selection changed; refresh inspector.");
-                double value = double.Parse(input.Text, CultureInfo.InvariantCulture);
-                if (!double.IsFinite(value) || (integer && value != Math.Truncate(value)))
-                    throw new InvalidOperationException("Enter a valid numeric parameter.");
-                await Request(new { action = "set", path, name, value });
-                await InspectAsync();
-            });
-            apply.VerticalAlignment = VerticalAlignment.Bottom;
-            Grid.SetColumn(apply, 1); field.Children.Add(apply);
-            _parameters.Children.Add(field);
-        }
+        foreach (var p in parms.EnumerateArray()) AddParameter(path,p);
     }
-    private void Draw() {
-        _viewport.Children.Clear();
-        if (_points.Length == 0 || _viewport.ActualWidth <= 0 || _viewport.ActualHeight <= 0) return;
-        Vector3 lo = _points[0], hi = lo;
-        foreach (var p in _points) { lo = Vector3.Min(lo,p); hi = Vector3.Max(hi,p); }
-        var center = (lo + hi) * .5f;
-        float radius = Math.Max((hi-lo).Length() * .5f, 1e-6f);
-        float scale = (float)(Math.Min(_viewport.ActualWidth,_viewport.ActualHeight) * .42 * _zoom.Value / radius);
-        var rotation = Matrix4x4.CreateRotationY((float)(_yaw.Value * Math.PI / 180)) *
-                       Matrix4x4.CreateRotationX((float)(_pitch.Value * Math.PI / 180));
-        var projected = _points.Select(p => Vector3.Transform(p-center,rotation)*scale).ToArray();
-        // Bound visual complexity: a single XAML Path, not one UI element per edge.
-        var geometry = new PathGeometry();
-        double cx = _viewport.ActualWidth / 2 + _panX, cy = _viewport.ActualHeight / 2 + _panY;
-        int stride = Math.Max(1, (_edges.Length + 19999) / 20000);
-        for (int i = 0; i < _edges.Length; i += stride) {
-            var (a,b) = _edges[i];
-            var p = projected[a]; var q = projected[b];
-            var figure = new PathFigure { StartPoint = new Windows.Foundation.Point(cx+p.X,cy-p.Y), IsClosed = false, IsFilled = false };
-            figure.Segments.Add(new LineSegment { Point = new Windows.Foundation.Point(cx+q.X,cy-q.Y) });
-            geometry.Figures.Add(figure);
-        }
-        if (_edges.Length == 0) {
-            foreach (var p in projected.Take(20000)) {
-                var figure = new PathFigure { StartPoint = new Windows.Foundation.Point(cx+p.X-1,cy-p.Y), IsFilled = false };
-                figure.Segments.Add(new LineSegment { Point = new Windows.Foundation.Point(cx+p.X+1,cy-p.Y) });
-                geometry.Figures.Add(figure);
+
+    private void AddParameter(string path, JsonElement p) {
+        string name=p.GetProperty("name").GetString()!, label=p.GetProperty("label").GetString()!;
+        string kind=p.GetProperty("kind").GetString()!;
+        var group=new StackPanel { Spacing=5, Margin=new Thickness(0,4,0,6) };
+        group.Children.Add(new TextBlock { Text=label, Foreground=Brush(194,222,232), FontWeight=Microsoft.UI.Text.FontWeights.SemiBold });
+        var values=p.GetProperty("values").EnumerateArray().ToArray();
+        var readers=new List<Func<object>>();
+        var keyReaders=new List<Func<double>>();
+        string[] basis=[];
+        if(kind=="ramp") {
+            var keys=p.GetProperty("keys").EnumerateArray().ToArray();
+            basis=p.GetProperty("basis").EnumerateArray().Select(x=>x.GetString()!).ToArray();
+            for(int i=0;i<keys.Length;i++) {
+                var row=new StackPanel { Orientation=Orientation.Horizontal, Spacing=4 };
+                var key=new NumberBox { Value=keys[i].GetDouble(), Minimum=0, Maximum=1, Width=90 };
+                keyReaders.Add(()=>key.Value); row.Children.Add(key);
+                if(values[i].ValueKind==JsonValueKind.Array) {
+                    var components=values[i].EnumerateArray().Select(x=>new NumberBox { Value=x.GetDouble(), Width=65 }).ToArray();
+                    foreach(var component in components) row.Children.Add(component);
+                    readers.Add(()=>components.Select(x=>x.Value).ToArray());
+                } else {
+                    var value=new NumberBox { Value=values[i].GetDouble(), Width=110 };
+                    row.Children.Add(value); readers.Add(()=>value.Value);
+                }
+                group.Children.Add(row);
+            }
+            group.Children.Add(new TextBlock { Text="Existing ramp keys · interpolation preserved", FontSize=11, Foreground=Brush(140,164,179) });
+        } else if(kind=="toggle") {
+            var toggle=new ToggleSwitch { IsOn=values[0].GetInt32()!=0 };
+            group.Children.Add(toggle); readers.Add(()=>toggle.IsOn?1:0);
+        } else if(p.TryGetProperty("labels",out var labels) && labels.GetArrayLength()>0 && values.Length==1) {
+            var choices=p.GetProperty("choices").EnumerateArray().Select(x=>x.GetString()!).ToArray();
+            var combo=new ComboBox { ItemsSource=labels.EnumerateArray().Select(x=>x.GetString()).ToArray(), HorizontalAlignment=HorizontalAlignment.Stretch };
+            combo.SelectedIndex=kind=="string"?Array.IndexOf(choices,values[0].GetString()):values[0].GetInt32();
+            group.Children.Add(combo);
+            readers.Add(()=>combo.SelectedIndex<0?throw new InvalidOperationException("Choose a menu value."):kind=="string"?choices[combo.SelectedIndex]:(object)combo.SelectedIndex);
+        } else if(kind=="string") {
+            foreach(var v in values) {
+                var input=new TextBox { Text=v.GetString()??"" };
+                group.Children.Add(input); readers.Add(()=>input.Text);
+            }
+        } else {
+            var fields=new Grid { ColumnSpacing=4 };
+            var controls=new List<NumberBox>();
+            for(int i=0;i<values.Length;i++) {
+                fields.ColumnDefinitions.Add(new ColumnDefinition { Width=new GridLength(1,GridUnitType.Star) });
+                var input=new NumberBox { Value=values[i].GetDouble(), SmallChange=kind=="int"?1:.1, MinWidth=0,
+                    Header=values.Length>1?(kind=="color"?"RGBA"[Math.Min(i,3)].ToString():i<4?"XYZW"[i].ToString():i.ToString()):null };
+                controls.Add(input); Grid.SetColumn(input,i); fields.Children.Add(input);
+                readers.Add(()=>kind=="int"?(object)checked((int)input.Value):input.Value);
+            }
+            group.Children.Add(fields);
+            if(kind=="color" && controls.Count>=3) {
+                byte Channel(double x)=>(byte)Math.Clamp(Math.Round(x*255),0,255);
+                var picker=new ColorPicker { Color=ColorHelper.FromArgb(255,Channel(controls[0].Value),Channel(controls[1].Value),Channel(controls[2].Value)), IsAlphaEnabled=false, IsColorChannelTextInputVisible=false };
+                picker.ColorChanged+=(_,e)=>{controls[0].Value=e.NewColor.R/255.0;controls[1].Value=e.NewColor.G/255.0;controls[2].Value=e.NewColor.B/255.0;};
+                group.Children.Add(new Button { Content="Color picker", Flyout=new Flyout { Content=picker } });
             }
         }
-        _viewport.Children.Add(new Microsoft.UI.Xaml.Shapes.Path { Data = geometry, Stroke = new SolidColorBrush(Colors.LightSkyBlue), StrokeThickness = 1, IsHitTestVisible = false });
+        var apply=Button("✓ Apply", async ()=>{
+            if(Selected!=path) throw new InvalidOperationException("Selection changed.");
+            var data=readers.Select(x=>x()).ToArray();
+            if(kind=="ramp") await Request(new { action="set_tuple", path, name, values=data, keys=keyReaders.Select(x=>x()).ToArray(), basis });
+            else await Request(new { action="set_tuple", path, name, values=data });
+            await InspectAsync();
+        });
+        apply.Background=Brush(19,112,123);
+        apply.HorizontalAlignment=HorizontalAlignment.Stretch;
+        group.Children.Add(apply);
+        _parameters.Children.Add(new Border { Background=Brush(31,46,59), CornerRadius=new CornerRadius(6), Padding=new Thickness(8), Child=group });
+    }
+    private void FilterOperators() {
+        _operators.ItemsSource=_operatorList.Where(x=>x.Name.Contains(_operatorFilter.Text,StringComparison.OrdinalIgnoreCase)||x.Label.Contains(_operatorFilter.Text,StringComparison.OrdinalIgnoreCase)).Take(500).ToArray();
+    }
+    private async Task LoadCatalogAsync() {
+        var catalog=await Request(new { action="operators" });
+        _operatorList.Clear();
+        foreach(var x in catalog.EnumerateArray()) _operatorList.Add(new(x.GetProperty("name").GetString()!,x.GetProperty("label").GetString()!,x.GetProperty("inputs").GetInt32()));
+        FilterOperators();
+        var tools=await Request(new { action="tools" });
+        _tools.ItemsSource=tools.EnumerateArray().Select(x=>new ToolEntry(x.GetProperty("name").GetString()!,x.GetProperty("file").GetString()!)).ToArray();
+        _status.Text=$"{_operatorList.Count:N0} SOP types · search to narrow the catalog";
+    }
+    private async Task AddOperatorAsync() {
+        var op=_operators.SelectedItem as OperatorEntry??throw new InvalidOperationException("Select an operator.");
+        if(op.Inputs>1) throw new InvalidOperationException("This operator requires multiple inputs. Wire it in Houdini first.");
+        if(op.Inputs>0 && Selected==null) throw new InvalidOperationException("Select a source SOP.");
+        var result=await Request(new { action="operator", kind=op.Name, path=Selected });
+        _filter.Text=""; await RefreshAsync(); _nodes.SelectedItem=result.GetString(); await InspectAsync();
+    }
+    private async Task InstallToolAsync() {
+        var tool=_tools.SelectedItem as ToolEntry??throw new InvalidOperationException("Select a SideFX tool.");
+        var result=await Request(new { action="install_hda", file=tool.File });
+        await LoadCatalogAsync();
+        _status.Text="Installed: "+string.Join(", ",result.EnumerateArray().Select(x=>x.GetString()));
+    }
+    private async Task ReadAttributesAsync() {
+        string path=Selected??throw new InvalidOperationException("Select a SOP first.");
+        var data=await Request(new { action="attributes",path });
+        _attributeText.Text=string.Join("\n\n",data.EnumerateArray().Select(x=>$"{x.GetProperty("owner").GetString()} / {x.GetProperty("name").GetString()} [{x.GetProperty("type").GetString()} × {x.GetProperty("size").GetInt32()}]\n"+string.Join("\n",x.GetProperty("values").EnumerateArray().Select(v=>v.GetString()))));
+    }
+    private async Task MatchViewAsync() {
+        var view=await Request(new { action="view" });
+        var m=view.GetProperty("rotation").EnumerateArray().Select(x=>x.GetSingle()).ToArray();
+        _syncedRotation=Matrix4x4.Transpose(new Matrix4x4(m[0],m[1],m[2],0,m[3],m[4],m[5],0,m[6],m[7],m[8],0,0,0,0,1));
+        Draw();
+    }
+    private void Draw() {
+        if(_drawPending || _viewport.ActualWidth<=0 || _viewport.ActualHeight<=0) return;
+        _drawPending=true;
+        DispatcherQueue.TryEnqueue(()=>{
+            _drawPending=false;
+            if(_viewport.ActualWidth<=0||_viewport.ActualHeight<=0)return;
+            double factor=Math.Min(1,Math.Min(1280/_viewport.ActualWidth,900/_viewport.ActualHeight));
+            var rotation=_syncedRotation??(Matrix4x4.CreateRotationY((float)(_yaw.Value*Math.PI/180))*Matrix4x4.CreateRotationX((float)(_pitch.Value*Math.PI/180)));
+            _preview.Width=_viewport.ActualWidth; _preview.Height=_viewport.ActualHeight;
+            _preview.Source=_raster.Render((int)(_viewport.ActualWidth*factor),(int)(_viewport.ActualHeight*factor),_points,_edges,_triangles,rotation,_zoom.Value,_panX*factor,_panY*factor,Math.Max(0,_shading.SelectedIndex));
+        });
     }
 }
