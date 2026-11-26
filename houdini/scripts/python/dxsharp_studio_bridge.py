@@ -116,10 +116,16 @@ class StudioBridge:
             if typ is None:
                 raise ValueError("Unknown SOP type")
             source = hou.node(request.get("path") or "/")
+            created_parent = False
             if isinstance(source, hou.SopNode):
                 parent = source.parent()
             else:
-                parent = hou.node("/obj").createNode("geo", "dxsharp_studio")
+                network = hou.node(request.get("network") or "/obj")
+                if network is not None and network.childTypeCategory() == hou.sopNodeTypeCategory():
+                    parent = network
+                else:
+                    parent = hou.node("/obj").createNode("geo", "dxsharp_studio")
+                    created_parent = True
             node = None
             try:
                 with hou.undos.group("DXSharp create SOP"):
@@ -133,7 +139,7 @@ class StudioBridge:
             except Exception:
                 if node is not None:
                     node.destroy()
-                if not isinstance(source, hou.SopNode):
+                if created_parent:
                     parent.destroy()
                 raise
         if action == "view":
