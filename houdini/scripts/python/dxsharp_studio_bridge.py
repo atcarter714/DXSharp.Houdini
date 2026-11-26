@@ -61,15 +61,29 @@ class StudioBridge:
         if action == "nodes":
             return sorted(n.path() for n in hou.node("/obj").allSubChildren()
                           if isinstance(n, hou.SopNode))
-        if action == "create":
-            kind = request.get("kind")
-            if kind not in ("box", "sphere", "torus"):
+        if action in ("create", "import"):
+            if action == "import":
+                source = pathlib.Path(request["file"])
+                if not source.is_absolute() or not source.is_file() or not str(source).lower().endswith((".bgeo", ".bgeo.sc")):
+                    raise ValueError("Select an existing absolute BGEO file path")
+
+            kind = "file" if action == "import" else request.get("kind")
+            if kind not in ("box", "sphere", "torus", "file"):
                 raise ValueError("Unsupported operator")
             parent = hou.node("/obj").createNode("geo", "dxsharp_studio")
             try:
                 for child in parent.children():
                     child.destroy()
                 sop = parent.createNode(kind)
+                if action == "import":
+                    sop.parm("file").set(source.as_posix())
+                if kind == "sphere":
+                    parm = sop.parm("type")
+                    if parm is not None:
+                        for i, label in enumerate(parm.menuLabels()):
+                            if label.lower() == "polygon":
+                                parm.set(i)
+                                break
                 sop.setDisplayFlag(True)
                 sop.setRenderFlag(True)
                 parent.layoutChildren()
@@ -80,6 +94,23 @@ class StudioBridge:
         node = hou.node(request.get("path", ""))
         if not isinstance(node, hou.SopNode):
             raise ValueError("Select a valid SOP")
+        if action == "revision":
+            node.geometry()
+            return {"cook": node.cookCount(), "scene": hou.hipFile.path(), "id": node.sessionId()}
+        if action == "recook":
+            node.cook(force=True)
+            return node.cookCount()
+        if action == "export":
+            target = pathlib.Path(request["file"])
+            if not target.is_absolute() or not str(target).lower().endswith((".bgeo", ".bgeo.sc")):
+                raise ValueError("Select an absolute BGEO output path")
+            if target.exists():
+                raise ValueError("Output already exists; choose a new file")
+            geo = node.geometry()
+            if geo is None:
+                raise ValueError("No cooked geometry")
+            geo.saveToFile(str(target))
+            return str(target)
         if action == "parameters":
             return [{"name": p.name(), "label": p.parmTemplate().label(),
                      "value": float(p.eval()),
@@ -111,8 +142,30 @@ class StudioBridge:
             indices = {p.number(): i for i, p in enumerate(points)}
             edges = set()
             polygons = 0
+            spheres = 0
+            unsupported = 0
             for prim in geo.prims():
                 if not isinstance(prim, hou.Polygon):
+                    if prim.type() == hou.primType.Sphere:
+                        matrix = hou.Matrix3(prim.intrinsicValue("transform"))
+                        origin = prim.vertices()[0].point().position()
+                        base = len(positions)
+                        rows, cols = 16, 32
+                        for y in range(rows + 1):
+                            phi = math.pi * y / rows
+                            for x in range(cols):
+                                theta = 2 * math.pi * x / cols
+                                v = hou.Vector3(math.sin(phi)*math.cos(theta), math.cos(phi), math.sin(phi)*math.sin(theta))
+                                positions.append(list(v * matrix + origin))
+                                i = base + y * cols + x
+                                edges.add((i, base + y * cols + (x+1) % cols))
+                                if y:
+                                    edges.add((i-cols, i))
+                        spheres += 1
+                        if len(positions) > 100000 or len(edges) > 200000:
+                            raise ValueError("Preview limit exceeded")
+                    else:
+                        unsupported += 1
                     continue
                 polygons += 1
                 corners = [indices[v.point().number()] for v in prim.vertices()]
@@ -122,7 +175,9 @@ class StudioBridge:
                     if len(edges) > 200000:
                         raise ValueError("Preview limit: 200,000 edges")
             return {"positions": positions, "edges": sorted(edges),
-                    "primitives": len(geo.prims()), "polygons": polygons}
+                    "primitives": len(geo.prims()), "polygons": polygons,
+                    "sourcePoints": len(points), "spheres": spheres, "unsupported": unsupported,
+                    "revision": node.cookCount()}
         raise ValueError("Unknown action")
 
 if hasattr(hou.session, "dxsharp_studio_bridge"):
