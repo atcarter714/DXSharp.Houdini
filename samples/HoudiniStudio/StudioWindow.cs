@@ -107,7 +107,8 @@ internal sealed class StudioWindow : Window {
         header.Children.Add(Button("Connect", ConnectAsync));
         header.Children.Add(Button("Refresh nodes", RefreshAsync));
         Grid.SetColumnSpan(header, 3);
-        root.Children.Add(header);
+        var headerScroll=new ScrollViewer { Content=header, HorizontalScrollMode=ScrollMode.Auto, HorizontalScrollBarVisibility=ScrollBarVisibility.Auto, VerticalScrollMode=ScrollMode.Disabled };
+        Grid.SetColumnSpan(headerScroll,3); root.Children.Add(headerScroll);
         _controls.Children.Add(new TextBlock { Text = "SCENE EXPLORER", FontSize = 17 });
         _controls.Children.Add(_filter);
         _filter.TextChanged += (_, _) => FilterNodes();
@@ -115,21 +116,25 @@ internal sealed class StudioWindow : Window {
         foreach (string kind in new[] {"box", "sphere", "torus"})
             create.Children.Add(Button(kind, () => CreateAsync(kind)));
         _controls.Children.Add(create);
-        _controls.Children.Add(new TextBlock { Text = "OPERATOR LIBRARY", Foreground = Brush(104,196,207), FontSize = 12 });
-        _controls.Children.Add(_operatorFilter);
+        var library = new StackPanel { Spacing = 8, Padding = new Thickness(4) };
+        library.Children.Add(new TextBlock { Text = "OPERATOR LIBRARY", Foreground = Brush(104,196,207), FontSize = 12 });
+        library.Children.Add(_operatorFilter);
         _operatorFilter.TextChanged += (_, _) => FilterOperators();
-        _controls.Children.Add(_operators);
-        _controls.Children.Add(Button("＋ Add operator", AddOperatorAsync));
-        _controls.Children.Add(_tools);
-        _controls.Children.Add(Button("↓ Install selected HDA", InstallToolAsync));
-        _controls.Children.Add(Button("… Install HDA file", InstallFileAsync));
-        _controls.Children.Add(Button("↻ Load operator catalog", LoadCatalogAsync));
+        library.Children.Add(_operators);
+        library.Children.Add(Button("＋ Add operator", AddOperatorAsync));
+        library.Children.Add(_tools);
+        library.Children.Add(Button("↓ Install selected HDA", InstallToolAsync));
+        library.Children.Add(Button("… Install HDA file", InstallFileAsync));
+        library.Children.Add(Button("↻ Load operator catalog", LoadCatalogAsync));
         var left = new Grid { RowSpacing = 8 };
         left.RowDefinitions.Add(new() { Height = GridLength.Auto });
         left.RowDefinitions.Add(new() { Height = new GridLength(1, GridUnitType.Star) });
         left.Children.Add(_controls);
         Grid.SetRow(_nodes, 1); left.Children.Add(_nodes);
-        var leftPanel = new Border { Background = Brush(25,35,47), CornerRadius = new CornerRadius(8), Child = left, Padding = new Thickness(10) };
+        var leftTabs = new Pivot();
+        leftTabs.Items.Add(new PivotItem { Header="Scene", Content=left });
+        leftTabs.Items.Add(new PivotItem { Header="Library", Content=new ScrollViewer { Content=library } });
+        var leftPanel = new Border { Background = Brush(25,35,47), CornerRadius = new CornerRadius(8), Child = leftTabs, Padding = new Thickness(6) };
         Grid.SetRow(leftPanel, 1); root.Children.Add(leftPanel);
         var center = new Grid { RowSpacing = 8 };
         center.RowDefinitions.Add(new() { Height = new GridLength(1, GridUnitType.Star) });
@@ -143,17 +148,17 @@ internal sealed class StudioWindow : Window {
         tools.Children.Add(Button("◎ Frame", () => { _panX = _panY = 0; _zoom.Value = 1; Draw(); return Task.CompletedTask; }));
         tools.Children.Add(Button("↻ Cook", RecookAsync));
         tools.Children.Add(Button("⇄ Match view", MatchViewAsync));
-        tools.Children.Add(_live);
-        tools.Children.Add(_followView);
-        tools.Children.Add(_renderTime);
-        camera.Children.Add(tools);
+        camera.Children.Add(new ScrollViewer { Content=tools, HorizontalScrollMode=ScrollMode.Auto, HorizontalScrollBarVisibility=ScrollBarVisibility.Auto, VerticalScrollMode=ScrollMode.Disabled });
+        var sync = new StackPanel { Orientation=Orientation.Horizontal, Spacing=10 };
+        sync.Children.Add(_live); sync.Children.Add(_followView); sync.Children.Add(_renderTime);
+        camera.Children.Add(new ScrollViewer { Content=sync, HorizontalScrollMode=ScrollMode.Auto, HorizontalScrollBarVisibility=ScrollBarVisibility.Auto, VerticalScrollMode=ScrollMode.Disabled });
         camera.Children.Add(new TextBlock { Text = "Left drag: orbit   |   Middle/right drag: pan   |   Wheel: zoom" });
         var io = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         io.Children.Add(_file);
         io.Children.Add(Button("… Browse", BrowseAsync));
         io.Children.Add(Button("Import BGEO", ImportAsync));
         io.Children.Add(Button("Export BGEO", ExportAsync));
-        camera.Children.Add(io);
+        camera.Children.Add(new ScrollViewer { Content=io, HorizontalScrollMode=ScrollMode.Auto, HorizontalScrollBarVisibility=ScrollBarVisibility.Auto, VerticalScrollMode=ScrollMode.Disabled });
         Grid.SetRow(camera, 1); center.Children.Add(camera);
         Grid.SetColumn(center, 1); Grid.SetRow(center, 1); root.Children.Add(center);
         var inspector = new StackPanel { Spacing = 8 };
@@ -175,7 +180,7 @@ internal sealed class StudioWindow : Window {
         _yaw.ValueChanged += (_, _) => Draw();
         _pitch.ValueChanged += (_, _) => Draw();
         _zoom.ValueChanged += (_, _) => Draw();
-        _nodes.SelectionChanged += async (_, _) => { if (!_busy && Selected != null) await RunAsync(InspectAsync); };
+        _nodes.SelectionChanged += async (_, _) => { _attributeText.Text=""; if (!_busy && Selected != null) await RunAsync(InspectAsync); };
         _viewport.PointerPressed += (_, e) => {
             var p = e.GetCurrentPoint(_viewport);
             _drag = p.Position;
@@ -370,7 +375,7 @@ internal sealed class StudioWindow : Window {
             }
             group.Children.Add(new TextBlock { Text="Existing ramp keys · interpolation preserved", FontSize=11, Foreground=Brush(140,164,179) });
         } else if(kind=="toggle") {
-            var toggle=new ToggleSwitch { IsOn=values[0].GetInt32()!=0 };
+            var toggle=new ToggleSwitch { IsOn=values[0].ValueKind==JsonValueKind.True || (values[0].ValueKind==JsonValueKind.Number && values[0].GetInt32()!=0) };
             group.Children.Add(toggle); readers.Add(()=>toggle.IsOn?1:0);
         } else if(p.TryGetProperty("labels",out var labels) && labels.GetArrayLength()>0 && values.Length==1) {
             var choices=p.GetProperty("choices").EnumerateArray().Select(x=>x.GetString()!).ToArray();
@@ -391,7 +396,7 @@ internal sealed class StudioWindow : Window {
                 var input=new NumberBox { Value=values[i].GetDouble(), SmallChange=kind=="int"?1:.1, MinWidth=0,
                     Header=values.Length>1?(kind=="color"?"RGBA"[Math.Min(i,3)].ToString():i<4?"XYZW"[i].ToString():i.ToString()):null };
                 controls.Add(input); Grid.SetColumn(input,i); fields.Children.Add(input);
-                readers.Add(()=>kind=="int"?(object)checked((int)input.Value):input.Value);
+                readers.Add(()=>kind=="int"?(object)(input.Value==Math.Truncate(input.Value)?checked((int)input.Value):throw new InvalidOperationException("Integer value required.")):input.Value);
             }
             group.Children.Add(fields);
             if(kind=="color" && controls.Count>=3) {
