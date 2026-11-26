@@ -16,7 +16,23 @@ internal sealed class StudioWindow : Window {
     private readonly ComboBox _sessions = new() { PlaceholderText = "Discover Houdini sessions", MinWidth = 220 };
     private readonly PreviewRasterizer _raster = new();
     private readonly Image _preview = new() { Stretch = Stretch.Fill, IsHitTestVisible = false };
-    private readonly ComboBox _shading = new() { ItemsSource = new[] { "Wireframe", "Shaded", "Shaded + edges" }, SelectedIndex = 2, MinWidth = 140 };
+    private readonly RadioButtons _shading = new() { MaxColumns=3, SelectedIndex=2 };
+    private readonly CheckBox _legacy = new() { Content="Include hidden / deprecated" };
+    private readonly TextBlock _catalogCount = new() { FontSize=12, Foreground=Brush(141,177,193) };
+    private readonly TextBlock _context = new() { Text="SOP · /obj", TextWrapping=TextWrapping.Wrap };
+    private readonly TextBlock _project = new() { FontFamily=new FontFamily("Consolas"), TextWrapping=TextWrapping.Wrap };
+    private readonly CheckBox _autoApply = new() { Content="Auto-apply edits" };
+    private readonly Dictionary<(string Path,string Name),object> _pending = [];
+    private DateTime _lastEdit;
+    private Vector3[] _colors=[];
+    private long _nodeId=-1;
+    private string? _scene;
+    private double _inspectorWidth=420;
+    private readonly ColumnDefinition _inspectorColumn=new() { Width=new GridLength(420), MinWidth=300 };
+    private readonly Dictionary<string,TreeViewNode> _treeNodes=new(StringComparer.Ordinal);
+    private sealed record SceneEntry(string Path,bool IsSop) {
+        public override string ToString()=>Path.Split('/').Last();
+    }
     private readonly ComboBox _operators = new() { PlaceholderText = "Select SOP operator", MaxWidth = 245 };
     private readonly TextBox _operatorFilter = new() { PlaceholderText = "Search operator types..." };
     private readonly ComboBox _tools = new() { PlaceholderText = "SideFX HDA tools", MaxWidth = 245 };
@@ -29,7 +45,7 @@ internal sealed class StudioWindow : Window {
     private readonly TextBlock _renderTime = new() { FontSize = 12, Foreground = Brush(141,177,193), VerticalAlignment = VerticalAlignment.Center };
     private readonly ComboBox _quality = new() { ItemsSource = new[] { "Fast", "Balanced", "Detailed" }, SelectedIndex = 1 };
     private static string SettingsFile => System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DXSharp", "HoudiniStudio", "settings.json");
-    private sealed record Preferences(int Shading, int Quality, bool Live);
+    private sealed record Preferences(int Shading, int Quality, bool Live, double InspectorWidth=420, bool AutoApply=false, bool FollowView=false);
     private void LoadPreferences() {
         try {
             if (!File.Exists(SettingsFile)) return;
@@ -38,16 +54,18 @@ internal sealed class StudioWindow : Window {
             _shading.SelectedIndex=Math.Clamp(p.Shading,0,2);
             _quality.SelectedIndex=Math.Clamp(p.Quality,0,2);
             _live.IsOn=p.Live;
+            _autoApply.IsChecked=p.AutoApply; _followView.IsChecked=p.FollowView;
+            _inspectorWidth=Math.Clamp(p.InspectorWidth,300,720); _inspectorColumn.Width=new GridLength(_inspectorWidth);
         } catch (IOException) { } catch (UnauthorizedAccessException) { } catch (JsonException) { }
     }
     private void SavePreferences() {
         try {
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(SettingsFile)!);
-            File.WriteAllText(SettingsFile,JsonSerializer.Serialize(new Preferences(_shading.SelectedIndex,_quality.SelectedIndex,_live.IsOn)));
+            File.WriteAllText(SettingsFile,JsonSerializer.Serialize(new Preferences(_shading.SelectedIndex,_quality.SelectedIndex,_live.IsOn,_inspectorWidth,_autoApply.IsChecked==true,_followView.IsChecked==true)));
         } catch (IOException) { } catch (UnauthorizedAccessException) { }
     }
-    private sealed record OperatorEntry(string Name, string Label, int Inputs) {
-        public override string ToString() => $"{Label} · {Name}";
+    private sealed record OperatorEntry(string Name, string Label, int Inputs, bool Hidden, bool Deprecated) {
+        public override string ToString() => $"{Label} · {Name}"+(Deprecated?" [legacy]":Hidden?" [hidden]":"");
     }
     private sealed record ToolEntry(string Name, string File) {
         public override string ToString() => Name;
@@ -56,7 +74,7 @@ internal sealed class StudioWindow : Window {
     private readonly TextBox _filter = new() { PlaceholderText = "Filter SOP paths..." };
     private readonly TextBox _file = new() { PlaceholderText = "Absolute .bgeo or .bgeo.sc path", MinWidth = 280 };
     private readonly ToggleSwitch _live = new() { Header = "Live update", IsOn = true };
-    private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(1) };
+    private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromMilliseconds(400) };
     private string[] _allNodes = [];
     private int _revision = -1;
     private string? _previewPath;
@@ -65,7 +83,7 @@ internal sealed class StudioWindow : Window {
     private double _panX, _panY;
     private readonly TextBox _directory = new() { PlaceholderText = "Paste bridge directory from Houdini Python Shell", MinWidth = 180 };
     private readonly TextBlock _status = new() { Text = "Disconnected", TextWrapping = TextWrapping.Wrap };
-    private readonly ListView _nodes = new() { SelectionMode = ListViewSelectionMode.Single };
+    private readonly TreeView _nodes = new() { SelectionMode = TreeViewSelectionMode.Single };
     private readonly StackPanel _parameters = new() { Spacing = 6 };
     private readonly Canvas _viewport = new() { Background = new SolidColorBrush( ColorHelper.FromArgb(255, 18, 23, 31) ) };
     private readonly Slider _yaw = new() { Minimum = -180, Maximum = 180, Value = 35, Header = "Orbit yaw" };
@@ -77,7 +95,14 @@ internal sealed class StudioWindow : Window {
     private bool _busy;
     private Vector3[] _points = [];
     private (int A, int B)[] _edges = [];
-    private string? Selected => _nodes.SelectedItem as string;
+    private string? Selected => _nodes.SelectedNode?.Content is SceneEntry { IsSop:true } n?n.Path:null;
+    private string? Network => _nodes.SelectedNode?.Content is SceneEntry n ? n.IsSop?n.Path[..n.Path.LastIndexOf('/')]:n.Path : null;
+    private void SelectPath(string? path) {
+        if(path!=null && _treeNodes.TryGetValue(path,out var node)) {
+            _nodes.SelectedNode=node;
+            for(var parent=node.Parent;parent!=null;parent=parent.Parent) parent.IsExpanded=true;
+        }
+    }
 
     public StudioWindow() {
         Title = "DXSharp Houdini Studio | Live SOP Explorer";
@@ -87,7 +112,12 @@ internal sealed class StudioWindow : Window {
         root.RowDefinitions.Add(new() { Height = GridLength.Auto });
         root.ColumnDefinitions.Add(new() { Width = new GridLength(285) });
         root.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
-        root.ColumnDefinitions.Add(new() { Width = new GridLength(330) });
+        root.ColumnDefinitions.Add(new() { Width = new GridLength(8) });
+        root.ColumnDefinitions.Add(_inspectorColumn);
+        _shading.Items.Add(Mode("Wireframe","\uE80A"));
+        _shading.Items.Add(Mode("Shaded","\uE91F"));
+        _shading.Items.Add(Mode("Shaded + edges","\uE81E"));
+        _shading.SelectedIndex=2;
         var header = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         header.Children.Add(new TextBlock { Text = "DXSHARP / HOUDINI", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = Brush(105,207,219), VerticalAlignment = VerticalAlignment.Center, FontSize = 16 });
         header.Children.Add(_sessions);
@@ -98,18 +128,18 @@ internal sealed class StudioWindow : Window {
         settingsPanel.Children.Add(new TextBlock { Text="Preview quality" });
         settingsPanel.Children.Add(_quality);
         _quality.SelectionChanged+=(_,_)=>Draw();
-        var advanced = new Flyout { Content = settingsPanel };
-        var settingsButton=new Button { Content = "⚙ Settings", Flyout = advanced, Background=Brush(38,64,80) };
+        var settingsButton=new Button { Content = "⚙ Settings", Background=Brush(38,64,80) };
         header.Children.Add(settingsButton);
         _sessions.SelectionChanged += (_, _) => {
             if (_sessions.SelectedItem is SessionEntry session) _directory.Text = session.Directory;
         };
         header.Children.Add(Button("Connect", ConnectAsync));
         header.Children.Add(Button("Refresh nodes", RefreshAsync));
-        Grid.SetColumnSpan(header, 3);
+        Grid.SetColumnSpan(header, 4);
         var headerScroll=new ScrollViewer { Content=header, HorizontalScrollMode=ScrollMode.Auto, HorizontalScrollBarVisibility=ScrollBarVisibility.Auto, VerticalScrollMode=ScrollMode.Disabled };
-        Grid.SetColumnSpan(headerScroll,3); root.Children.Add(headerScroll);
+        Grid.SetColumnSpan(headerScroll,4); root.Children.Add(headerScroll);
         _controls.Children.Add(new TextBlock { Text = "SCENE EXPLORER", FontSize = 17 });
+        _controls.Children.Add(_context);
         _controls.Children.Add(_filter);
         _filter.TextChanged += (_, _) => FilterNodes();
         var create = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
@@ -120,6 +150,9 @@ internal sealed class StudioWindow : Window {
         library.Children.Add(new TextBlock { Text = "OPERATOR LIBRARY", Foreground = Brush(104,196,207), FontSize = 12 });
         library.Children.Add(_operatorFilter);
         _operatorFilter.TextChanged += (_, _) => FilterOperators();
+        library.Children.Add(_legacy);
+        _legacy.Checked+=(_,_)=>FilterOperators(); _legacy.Unchecked+=(_,_)=>FilterOperators();
+        library.Children.Add(_catalogCount);
         library.Children.Add(_operators);
         library.Children.Add(Button("＋ Add operator", AddOperatorAsync));
         library.Children.Add(_tools);
@@ -137,10 +170,11 @@ internal sealed class StudioWindow : Window {
         var leftPanel = new Border { Background = Brush(25,35,47), CornerRadius = new CornerRadius(8), Child = leftTabs, Padding = new Thickness(6) };
         Grid.SetRow(leftPanel, 1); root.Children.Add(leftPanel);
         var center = new Grid { RowSpacing = 8 };
+        center.RowDefinitions.Add(new() { Height = GridLength.Auto });
         center.RowDefinitions.Add(new() { Height = new GridLength(1, GridUnitType.Star) });
         center.RowDefinitions.Add(new() { Height = GridLength.Auto });
         _viewport.Children.Add(_preview);
-        center.Children.Add(_viewport);
+        Grid.SetRow(_viewport,1); center.Children.Add(_viewport);
         var camera = new StackPanel { Spacing = 4 };
         var tools = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         tools.Children.Add(_shading);
@@ -148,7 +182,7 @@ internal sealed class StudioWindow : Window {
         tools.Children.Add(Button("◎ Frame", () => { _panX = _panY = 0; _zoom.Value = 1; Draw(); return Task.CompletedTask; }));
         tools.Children.Add(Button("↻ Cook", RecookAsync));
         tools.Children.Add(Button("⇄ Match view", MatchViewAsync));
-        camera.Children.Add(new ScrollViewer { Content=tools, HorizontalScrollMode=ScrollMode.Auto, HorizontalScrollBarVisibility=ScrollBarVisibility.Auto, VerticalScrollMode=ScrollMode.Disabled });
+        center.Children.Add(new ScrollViewer { Content=tools, HorizontalScrollMode=ScrollMode.Auto, HorizontalScrollBarVisibility=ScrollBarVisibility.Auto, VerticalScrollMode=ScrollMode.Disabled });
         var sync = new StackPanel { Orientation=Orientation.Horizontal, Spacing=10 };
         sync.Children.Add(_live); sync.Children.Add(_followView); sync.Children.Add(_renderTime);
         camera.Children.Add(new ScrollViewer { Content=sync, HorizontalScrollMode=ScrollMode.Auto, HorizontalScrollBarVisibility=ScrollBarVisibility.Auto, VerticalScrollMode=ScrollMode.Disabled });
@@ -159,13 +193,17 @@ internal sealed class StudioWindow : Window {
         io.Children.Add(Button("Import BGEO", ImportAsync));
         io.Children.Add(Button("Export BGEO", ExportAsync));
         camera.Children.Add(new ScrollViewer { Content=io, HorizontalScrollMode=ScrollMode.Auto, HorizontalScrollBarVisibility=ScrollBarVisibility.Auto, VerticalScrollMode=ScrollMode.Disabled });
-        Grid.SetRow(camera, 1); center.Children.Add(camera);
+        Grid.SetRow(camera, 2); center.Children.Add(camera);
         Grid.SetColumn(center, 1); Grid.SetRow(center, 1); root.Children.Add(center);
         var inspector = new StackPanel { Spacing = 8 };
         inspector.Children.Add(new TextBlock { Text = "PARAMETERS", FontSize = 17 });
-        inspector.Children.Add(Button("Read geometry / parameters", InspectAsync));
+        var parmTools=new StackPanel { Orientation=Orientation.Horizontal, Spacing=6 };
+        parmTools.Children.Add(Button("Refresh", InspectAsync));
+        parmTools.Children.Add(Button("Sync edits", FlushEditsAsync));
+        inspector.Children.Add(parmTools);
+        inspector.Children.Add(_autoApply);
         inspector.Children.Add(_parameters);
-        var scroll = new ScrollViewer { Content = inspector };
+        var scroll = new ScrollViewer { Content = inspector, VerticalScrollBarVisibility=ScrollBarVisibility.Visible, HorizontalScrollMode=ScrollMode.Disabled, Padding=new Thickness(0,0,10,0) };
         var tabs = new Pivot();
         tabs.Items.Add(new PivotItem { Header = "Parameters", Content = scroll });
         var attrs = new StackPanel { Spacing = 8, Padding = new Thickness(8) };
@@ -173,14 +211,45 @@ internal sealed class StudioWindow : Window {
         attrs.Children.Add(_attributeText);
         tabs.Items.Add(new PivotItem { Header = "Attributes", Content = new ScrollViewer { Content = attrs } });
         var rightPanel = new Border { Background = Brush(25,35,47), CornerRadius = new CornerRadius(8), Child = tabs, Padding = new Thickness(6) };
-        Grid.SetColumn(rightPanel, 2); Grid.SetRow(rightPanel, 1); root.Children.Add(rightPanel);
-        Grid.SetRow(_status, 2); Grid.SetColumnSpan(_status, 3); root.Children.Add(_status);
-        Content = root;
+        Grid.SetColumn(rightPanel, 3); Grid.SetRow(rightPanel, 1); root.Children.Add(rightPanel);
+        var splitter=new Border { Background=Brush(56,80,96), CornerRadius=new CornerRadius(3), MinWidth=8 };
+        Grid.SetColumn(splitter,2); Grid.SetRow(splitter,1); root.Children.Add(splitter);
+        double? splitStart=null;
+        double originalWidth=0;
+        splitter.PointerPressed+=(_,e)=>{splitStart=e.GetCurrentPoint(root).Position.X; originalWidth=_inspectorWidth; splitter.CapturePointer(e.Pointer); e.Handled=true;};
+        splitter.PointerMoved+=(_,e)=>{
+            if(splitStart is not double x)return;
+            _inspectorWidth=Math.Clamp(originalWidth+x-e.GetCurrentPoint(root).Position.X,300,Math.Max(300,Math.Min(720,root.ActualWidth-580)));
+            _inspectorColumn.Width=new GridLength(_inspectorWidth);
+        };
+        splitter.PointerReleased+=(_,e)=>{splitStart=null; splitter.ReleasePointerCapture(e.Pointer);};
+        splitter.PointerCaptureLost+=(_,_)=>splitStart=null;
+        ToolTipService.SetToolTip(splitter,"Drag to resize inspector");
+        var projectPanel=new StackPanel { Spacing=8, Padding=new Thickness(16) };
+        projectPanel.Children.Add(Button("Refresh project", ReadProjectAsync));
+        projectPanel.Children.Add(_project);
+        var projectTab=new TabViewItem { Header="Project", IsClosable=false, Content=new ScrollViewer { Content=projectPanel } };
+        settingsPanel.Width=420;
+        settingsPanel.Children.Add(Button("Save settings",()=>{SavePreferences(); _status.Text="Settings saved: "+SettingsFile; return Task.CompletedTask;}));
+        settingsPanel.Children.Add(new TextBlock { Text=SettingsFile, TextWrapping=TextWrapping.Wrap });
+        var settingsTab=new TabViewItem { Header="Settings", IsClosable=false, Content=new ScrollViewer { Content=settingsPanel } };
+        Grid.SetRow(_status, 2); Grid.SetColumnSpan(_status, 4); root.Children.Add(_status);
+        var workspace=new TabView { IsAddTabButtonVisible=false };
+        workspace.TabItems.Add(new TabViewItem { Header="Scene workspace", IsClosable=false, Content=root });
+        workspace.TabItems.Add(projectTab); workspace.TabItems.Add(settingsTab);
+        workspace.SelectedIndex=0;
+        settingsButton.Click+=(_,_)=>workspace.SelectedItem=settingsTab;
+        Content=workspace;
         _viewport.SizeChanged += (_, _) => Draw();
         _yaw.ValueChanged += (_, _) => Draw();
         _pitch.ValueChanged += (_, _) => Draw();
         _zoom.ValueChanged += (_, _) => Draw();
-        _nodes.SelectionChanged += async (_, _) => { _attributeText.Text=""; if (!_busy && Selected != null) await RunAsync(InspectAsync); };
+        _nodes.ItemInvoked += async (_,e) => {
+            if(e.InvokedItem is TreeViewNode n) _nodes.SelectedNode=n;
+            _attributeText.Text="";
+            _context.Text="SOP · "+(Network??"/obj");
+            if(!_busy && Selected!=null) await RunAsync(InspectAsync);
+        };
         _viewport.PointerPressed += (_, e) => {
             var p = e.GetCurrentPoint(_viewport);
             _drag = p.Position;
@@ -208,8 +277,9 @@ internal sealed class StudioWindow : Window {
             e.Handled = true;
         };
         _timer.Tick += async (_, _) => {
-            if (_bridge != null && !_busy && (_followView.IsChecked==true || (_live.IsOn && Selected!=null)))
+            if (_bridge != null && !_busy && (_followView.IsChecked==true || (_live.IsOn && Selected!=null) || (_autoApply.IsChecked==true && _pending.Count>0)))
                 await RunAsync(async ()=>{
+                    if (_autoApply.IsChecked==true && _pending.Count>0 && DateTime.UtcNow-_lastEdit>TimeSpan.FromMilliseconds(350)) await FlushEditsAsync();
                     if (_live.IsOn && Selected!=null) await CheckRevisionAsync();
                     if (_followView.IsChecked==true && _drag==null) await MatchViewAsync();
                 });
@@ -286,7 +356,7 @@ internal sealed class StudioWindow : Window {
         var result = await candidate.RequestAsync(new { action = "ping" }, _lifetime.Token);
         _bridge = candidate;
         _revision = -1;
-        _previewPath = null;
+        _previewPath = null; _pending.Clear(); _nodeId=-1; _scene=null;
         _status.Text = $"Connected: Houdini {result.GetProperty("version").GetString()} | {result.GetProperty("scene").GetString()}";
         await RefreshAsync();
     }
@@ -295,7 +365,7 @@ internal sealed class StudioWindow : Window {
         var result = await Request(new { action = "nodes" });
         _allNodes = result.EnumerateArray().Select(x => x.GetString()!).ToArray();
         FilterNodes();
-        _nodes.SelectedItem = selected;
+        SelectPath(selected);
     }
     private void FilterNodes() {
         string? selected = Selected;
@@ -307,8 +377,9 @@ internal sealed class StudioWindow : Window {
         if (_parameters.XamlRoot is not null && Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(_parameters.XamlRoot) is DependencyObject focused) {
             for (DependencyObject? parent=focused;parent!=null;parent=VisualTreeHelper.GetParent(parent)) if (ReferenceEquals(parent,_parameters)) return;
         }
+        if(_pending.Keys.Any(k=>k.Path==path)) return;
         var result = await Request(new { action = "revision", path });
-        if (Selected == path && (_previewPath != path || _revision != result.GetProperty("cook").GetInt32()))
+        if (Selected == path && (_previewPath != path || _revision != result.GetProperty("cook").GetInt32() || _nodeId!=result.GetProperty("id").GetInt64() || _scene!=result.GetProperty("scene").GetString()))
             await InspectAsync();
     }
     private async Task RecookAsync() {
@@ -333,7 +404,7 @@ internal sealed class StudioWindow : Window {
         var result = await Request(new { action = "import", file = GeometryFile() });
         _filter.Text = "";
         await RefreshAsync();
-        _nodes.SelectedItem = result.GetString();
+        SelectPath(result.GetString());
         await InspectAsync();
     }
     private async Task ExportAsync() {
@@ -345,17 +416,20 @@ internal sealed class StudioWindow : Window {
         var result = await Request(new { action = "create", kind });
         _filter.Text = "";
         await RefreshAsync();
-        _nodes.SelectedItem = result.GetString();
+        SelectPath(result.GetString());
         await InspectAsync();
     }
-    private async Task InspectAsync() {
+    private Task InspectAsync()=>InspectAsync(true);
+    private async Task InspectAsync(bool rebuildParameters) {
         string path = Selected ?? throw new InvalidOperationException("Select a SOP first.");
         var data = await Request(new { action = "geometry", path });
         if (Selected != path) return;
         _revision = data.TryGetProperty("revision", out var rev) ? rev.GetInt32() : -1;
         _previewPath = path;
+        _nodeId=data.GetProperty("nodeId").GetInt64(); _scene=data.GetProperty("scene").GetString();
         _points = data.GetProperty("positions").EnumerateArray().Select(p =>
             new Vector3(p[0].GetSingle(), p[1].GetSingle(), p[2].GetSingle())).ToArray();
+        _colors=data.TryGetProperty("colors",out var colors)?colors.EnumerateArray().Select(p=>new Vector3(p[0].GetSingle(),p[1].GetSingle(),p[2].GetSingle())).ToArray():[];
         _triangles = data.TryGetProperty("triangles", out var triangles) ? triangles.EnumerateArray().Select(x => x.GetInt32()).ToArray() : [];
         _edges = data.GetProperty("edges").EnumerateArray().Select(e => (e[0].GetInt32(), e[1].GetInt32())).ToArray();
         Draw();
@@ -363,6 +437,7 @@ internal sealed class StudioWindow : Window {
         int unsupported = data.TryGetProperty("unsupported", out var skipped) ? skipped.GetInt32() : 0;
         _status.Text = $"{path} | {sourcePoints:N0} source points | {data.GetProperty("primitives").GetInt32():N0} primitives | {_edges.Length:N0} preview edges | Cook {_revision}" +
             (unsupported > 0 ? $" | {unsupported} unsupported primitives" : "");
+        if(!rebuildParameters || _pending.Keys.Any(k=>k.Path==path)) return;
         var parms = await Request(new { action = "tuples", path });
         if (Selected != path) return;
         _parameters.Children.Clear();
@@ -373,7 +448,11 @@ internal sealed class StudioWindow : Window {
         string name=p.GetProperty("name").GetString()!, label=p.GetProperty("label").GetString()!;
         string kind=p.GetProperty("kind").GetString()!;
         var group=new StackPanel { Spacing=5, Margin=new Thickness(0,4,0,6) };
-        group.Children.Add(new TextBlock { Text=label, Foreground=Brush(194,222,232), FontWeight=Microsoft.UI.Text.FontWeights.SemiBold });
+        var titleRow=new Grid { ColumnSpacing=6 };
+        titleRow.ColumnDefinitions.Add(new() { Width=new GridLength(1,GridUnitType.Star) }); titleRow.ColumnDefinitions.Add(new() { Width=GridLength.Auto });
+        titleRow.Children.Add(new TextBlock { Text=label, Foreground=Brush(194,222,232), FontWeight=Microsoft.UI.Text.FontWeights.SemiBold, VerticalAlignment=VerticalAlignment.Center, TextWrapping=TextWrapping.Wrap });
+        group.Children.Add(titleRow);
+        var tracked=new List<FrameworkElement>();
         var values=p.GetProperty("values").EnumerateArray().ToArray();
         var readers=new List<Func<object>>();
         var keyReaders=new List<Func<double>>();
@@ -384,31 +463,31 @@ internal sealed class StudioWindow : Window {
             for(int i=0;i<keys.Length;i++) {
                 var row=new StackPanel { Orientation=Orientation.Horizontal, Spacing=4 };
                 var key=new NumberBox { Value=keys[i].GetDouble(), Minimum=0, Maximum=1, Width=90 };
-                keyReaders.Add(()=>key.Value); row.Children.Add(key);
+                tracked.Add(key); keyReaders.Add(()=>key.Value); row.Children.Add(key);
                 if(values[i].ValueKind==JsonValueKind.Array) {
                     var components=values[i].EnumerateArray().Select(x=>new NumberBox { Value=x.GetDouble(), Width=65 }).ToArray();
-                    foreach(var component in components) row.Children.Add(component);
+                    foreach(var component in components) { row.Children.Add(component); tracked.Add(component); }
                     readers.Add(()=>components.Select(x=>x.Value).ToArray());
                 } else {
                     var value=new NumberBox { Value=values[i].GetDouble(), Width=110 };
-                    row.Children.Add(value); readers.Add(()=>value.Value);
+                    row.Children.Add(value); tracked.Add(value); readers.Add(()=>value.Value);
                 }
                 group.Children.Add(row);
             }
             group.Children.Add(new TextBlock { Text="Existing ramp keys · interpolation preserved", FontSize=11, Foreground=Brush(140,164,179) });
         } else if(kind=="toggle") {
             var toggle=new ToggleSwitch { IsOn=values[0].ValueKind==JsonValueKind.True || (values[0].ValueKind==JsonValueKind.Number && values[0].GetInt32()!=0) };
-            group.Children.Add(toggle); readers.Add(()=>toggle.IsOn?1:0);
+            group.Children.Add(toggle); tracked.Add(toggle); readers.Add(()=>toggle.IsOn?1:0);
         } else if(p.TryGetProperty("labels",out var labels) && labels.GetArrayLength()>0 && values.Length==1) {
             var choices=p.GetProperty("choices").EnumerateArray().Select(x=>x.GetString()!).ToArray();
             var combo=new ComboBox { ItemsSource=labels.EnumerateArray().Select(x=>x.GetString()).ToArray(), HorizontalAlignment=HorizontalAlignment.Stretch };
             combo.SelectedIndex=kind=="string"?Array.IndexOf(choices,values[0].GetString()):values[0].GetInt32();
-            group.Children.Add(combo);
+            group.Children.Add(combo); tracked.Add(combo);
             readers.Add(()=>combo.SelectedIndex<0?throw new InvalidOperationException("Choose a menu value."):kind=="string"?choices[combo.SelectedIndex]:(object)combo.SelectedIndex);
         } else if(kind=="string") {
             foreach(var v in values) {
                 var input=new TextBox { Text=v.GetString()??"" };
-                group.Children.Add(input); readers.Add(()=>input.Text);
+                group.Children.Add(input); tracked.Add(input); readers.Add(()=>input.Text);
             }
         } else {
             var fields=new Grid { ColumnSpacing=4 };
@@ -417,7 +496,7 @@ internal sealed class StudioWindow : Window {
                 fields.ColumnDefinitions.Add(new ColumnDefinition { Width=new GridLength(1,GridUnitType.Star) });
                 var input=new NumberBox { Value=values[i].GetDouble(), SmallChange=kind=="int"?1:.1, MinWidth=0,
                     Header=values.Length>1?(kind=="color"?"RGBA"[Math.Min(i,3)].ToString():i<4?"XYZW"[i].ToString():i.ToString()):null };
-                controls.Add(input); Grid.SetColumn(input,i); fields.Children.Add(input);
+                controls.Add(input); tracked.Add(input); Grid.SetColumn(input,i); fields.Children.Add(input);
                 readers.Add(()=>kind=="int"?(object)(input.Value==Math.Truncate(input.Value)?checked((int)input.Value):throw new InvalidOperationException("Integer value required.")):input.Value);
             }
             group.Children.Add(fields);
@@ -428,25 +507,61 @@ internal sealed class StudioWindow : Window {
                 group.Children.Add(new Button { Content="Color picker", Flyout=new Flyout { Content=picker } });
             }
         }
-        var apply=Button("✓ Apply", async ()=>{
-            if(Selected!=path) throw new InvalidOperationException("Selection changed.");
+        object Payload() {
             var data=readers.Select(x=>x()).ToArray();
-            if(kind=="ramp") await Request(new { action="set_tuple", path, name, values=data, keys=keyReaders.Select(x=>x()).ToArray(), basis });
-            else await Request(new { action="set_tuple", path, name, values=data });
-            await InspectAsync();
+            return kind=="ramp" ? new { action="set_tuple", path, name, values=data, keys=keyReaders.Select(x=>x()).ToArray(), basis } : (object)new { action="set_tuple", path, name, values=data };
+        }
+        void MarkDirty() {
+            if(Selected!=path) return;
+            try { _pending[(path,name)]=Payload(); _lastEdit=DateTime.UtcNow; }
+            catch(Exception ex) { _status.Text=ex.Message; }
+        }
+        var apply=Button("Apply",async ()=>{
+            if(Selected!=path) throw new InvalidOperationException("Selection changed.");
+            _pending[(path,name)]=Payload();
+            await FlushEditsAsync();
         });
-        apply.Background=Brush(19,112,123);
-        apply.HorizontalAlignment=HorizontalAlignment.Stretch;
-        group.Children.Add(apply);
+        apply.Content=new FontIcon { FontFamily=new FontFamily("Segoe MDL2 Assets"), Glyph="\uE72C", FontSize=14 };
+        apply.Background=Brush(19,112,123); apply.Padding=new Thickness(7); 
+        Grid.SetColumn(apply,1); titleRow.Children.Add(apply);
+        foreach(var field in tracked) {
+            if(field is NumberBox number) number.ValueChanged+=(_,_)=>MarkDirty();
+            else if(field is TextBox text) text.LostFocus+=(_,_)=>MarkDirty();
+            else if(field is ComboBox combo) combo.SelectionChanged+=(_,_)=>MarkDirty();
+            else if(field is ToggleSwitch toggle) toggle.Toggled+=(_,_)=>MarkDirty();
+        }
         _parameters.Children.Add(new Border { Background=Brush(31,46,59), CornerRadius=new CornerRadius(6), Padding=new Thickness(8), Child=group });
     }
+    private static RadioButton Mode(string label,string glyph) {
+        var panel=new StackPanel { Orientation=Orientation.Horizontal, Spacing=5 };
+        panel.Children.Add(new FontIcon { Glyph=glyph, FontFamily=new FontFamily("Segoe MDL2 Assets"), FontSize=15 });
+        panel.Children.Add(new TextBlock { Text=label });
+        var mode=new RadioButton { Content=panel };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(mode,label);
+        ToolTipService.SetToolTip(mode,label);
+        return mode;
+    }
+    private async Task FlushEditsAsync() {
+        if(_pending.Count==0) { _status.Text="No pending parameter edits."; return; }
+        foreach(var pair in _pending.ToArray()) {
+            await Request(pair.Value);
+            if(_pending.TryGetValue(pair.Key,out var current) && ReferenceEquals(current,pair.Value)) _pending.Remove(pair.Key);
+        }
+        if(Selected!=null) await InspectAsync(false);
+    }
+    private async Task ReadProjectAsync() {
+        var data=await Request(new { action="project" });
+        _project.Text=JsonSerializer.Serialize(data,new JsonSerializerOptions { WriteIndented=true });
+        _context.Text="SOP · "+data.GetProperty("network").GetString();
+    }
     private void FilterOperators() {
-        _operators.ItemsSource=_operatorList.Where(x=>x.Name.Contains(_operatorFilter.Text,StringComparison.OrdinalIgnoreCase)||x.Label.Contains(_operatorFilter.Text,StringComparison.OrdinalIgnoreCase)).Take(500).ToArray();
+        var matches=_operatorList.Where(x=>(_legacy.IsChecked==true||(!x.Hidden&&!x.Deprecated))&&(x.Name.Contains(_operatorFilter.Text,StringComparison.OrdinalIgnoreCase)||x.Label.Contains(_operatorFilter.Text,StringComparison.OrdinalIgnoreCase))).ToArray();
+        _operators.ItemsSource=matches; _catalogCount.Text=$"{matches.Length:N0} / {_operatorList.Count:N0} SOP operators";
     }
     private async Task LoadCatalogAsync() {
         var catalog=await Request(new { action="operators" });
         _operatorList.Clear();
-        foreach(var x in catalog.EnumerateArray()) _operatorList.Add(new(x.GetProperty("name").GetString()!,x.GetProperty("label").GetString()!,x.GetProperty("inputs").GetInt32()));
+        foreach(var x in catalog.EnumerateArray()) _operatorList.Add(new(x.GetProperty("name").GetString()!,x.GetProperty("label").GetString()!,x.GetProperty("inputs").GetInt32(),x.GetProperty("hidden").GetBoolean(),x.GetProperty("deprecated").GetBoolean()));
         FilterOperators();
         var tools=await Request(new { action="tools" });
         _tools.ItemsSource=tools.EnumerateArray().Select(x=>new ToolEntry(x.GetProperty("name").GetString()!,x.GetProperty("file").GetString()!)).ToArray();
@@ -456,8 +571,8 @@ internal sealed class StudioWindow : Window {
         var op=_operators.SelectedItem as OperatorEntry??throw new InvalidOperationException("Select an operator.");
         if(op.Inputs>1) throw new InvalidOperationException("This operator requires multiple inputs. Wire it in Houdini first.");
         if(op.Inputs>0 && Selected==null) throw new InvalidOperationException("Select a source SOP.");
-        var result=await Request(new { action="operator", kind=op.Name, path=Selected });
-        _filter.Text=""; await RefreshAsync(); _nodes.SelectedItem=result.GetString(); await InspectAsync();
+        var result=await Request(new { action="operator", kind=op.Name, path=Selected, network=Network });
+        _filter.Text=""; await RefreshAsync(); SelectPath(result.GetString()); await InspectAsync();
     }
     private async Task InstallFileAsync() {
         var picker=new Windows.Storage.Pickers.FileOpenPicker();
@@ -497,7 +612,7 @@ internal sealed class StudioWindow : Window {
             var watch=System.Diagnostics.Stopwatch.StartNew();
             var rotation=_syncedRotation??(Matrix4x4.CreateRotationY((float)(_yaw.Value*Math.PI/180))*Matrix4x4.CreateRotationX((float)(_pitch.Value*Math.PI/180)));
             _preview.Width=_viewport.ActualWidth; _preview.Height=_viewport.ActualHeight;
-            _preview.Source=_raster.Render((int)(_viewport.ActualWidth*factor),(int)(_viewport.ActualHeight*factor),_points,_edges,_triangles,rotation,_zoom.Value,_panX*factor,_panY*factor,Math.Max(0,_shading.SelectedIndex));
+            _preview.Source=_raster.Render((int)(_viewport.ActualWidth*factor),(int)(_viewport.ActualHeight*factor),_points,_edges,_triangles,_colors,rotation,_zoom.Value,_panX*factor,_panY*factor,Math.Max(0,_shading.SelectedIndex));
             _renderTime.Text=$"{watch.Elapsed.TotalMilliseconds:F0} ms · CPU";
         });
     }
