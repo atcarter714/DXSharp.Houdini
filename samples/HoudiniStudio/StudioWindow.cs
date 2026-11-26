@@ -10,7 +10,11 @@ using System.Text.Json;
 namespace DXSharp.Houdini.Studio;
 
 internal sealed class StudioWindow : Window {
-    private readonly TextBox _directory = new() { PlaceholderText = "Paste bridge directory from Houdini Python Shell", MinWidth = 400 };
+    private sealed record SessionEntry(string Directory, int Pid, string Version, string Scene) {
+        public override string ToString() => $"Houdini {Version} · PID {Pid} · {System.IO.Path.GetFileName(Scene)}";
+    }
+    private readonly ComboBox _sessions = new() { PlaceholderText = "Discover Houdini sessions", MinWidth = 300 };
+    private readonly TextBox _directory = new() { PlaceholderText = "Paste bridge directory from Houdini Python Shell", MinWidth = 230 };
     private readonly TextBlock _status = new() { Text = "Disconnected", TextWrapping = TextWrapping.Wrap };
     private readonly ListView _nodes = new() { SelectionMode = ListViewSelectionMode.Single };
     private readonly StackPanel _parameters = new() { Spacing = 6 };
@@ -36,7 +40,12 @@ internal sealed class StudioWindow : Window {
         root.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
         root.ColumnDefinitions.Add(new() { Width = new GridLength(280) });
         var header = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        header.Children.Add(_sessions);
+        header.Children.Add(Button("Discover", DiscoverAsync));
         header.Children.Add(_directory);
+        _sessions.SelectionChanged += (_, _) => {
+            if (_sessions.SelectedItem is SessionEntry session) _directory.Text = session.Directory;
+        };
         header.Children.Add(Button("Connect", ConnectAsync));
         header.Children.Add(Button("Refresh nodes", RefreshAsync));
         Grid.SetColumnSpan(header, 3);
@@ -71,6 +80,10 @@ internal sealed class StudioWindow : Window {
         _zoom.ValueChanged += (_, _) => Draw();
         _nodes.SelectionChanged += async (_, _) => { if (!_busy && Selected != null) await RunAsync(InspectAsync); };
         Closed += (_, _) => _lifetime.Cancel();
+        root.Loaded += async (_, _) => await RunAsync(async () => {
+            await DiscoverAsync();
+            if (_sessions.Items.Count == 1) await ConnectAsync();
+        });
     }
 
     private Button Button(string label, Func<Task> action) {
@@ -87,7 +100,29 @@ internal sealed class StudioWindow : Window {
     }
     private Task<JsonElement> Request(object request) =>
         (_bridge ?? throw new InvalidOperationException("Connect to Houdini first.")).RequestAsync(request, _lifetime.Token);
+    private Task DiscoverAsync() {
+        var sessions = new List<SessionEntry>();
+        foreach (string directory in Directory.EnumerateDirectories(System.IO.Path.GetTempPath(), "dxsharp-houdini-*")) {
+            try {
+                using var manifest = JsonDocument.Parse(File.ReadAllText(System.IO.Path.Combine(directory, "session.json")));
+                var data = manifest.RootElement;
+                if (data.GetProperty("protocol").GetInt32() != 1) continue;
+                int pid = data.GetProperty("pid").GetInt32();
+                using var process = System.Diagnostics.Process.GetProcessById(pid);
+                if (process.HasExited || !process.ProcessName.StartsWith("houdini", StringComparison.OrdinalIgnoreCase)) continue;
+                sessions.Add(new(directory, pid, data.GetProperty("version").GetString()!, data.GetProperty("scene").GetString()!));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception or KeyNotFoundException) { }
+        }
+        _sessions.ItemsSource = sessions.OrderBy(x => x.Pid).ToArray();
+        if (sessions.Count == 1) _sessions.SelectedIndex = 0;
+        _status.Text = sessions.Count == 0 ? "No active bridge. Start Studio Bridge from the DXSharp shelf in Houdini." : $"{sessions.Count} Houdini session(s) found.";
+        return Task.CompletedTask;
+    }
     private async Task ConnectAsync() {
+        if (string.IsNullOrWhiteSpace(_directory.Text))
+            throw new InvalidOperationException("Start the Houdini bridge, then Discover and select a session.");
+        _bridge = null;
         _bridge = new BridgeClient(_directory.Text.Trim());
         var result = await Request(new { action = "ping" });
         _status.Text = $"Connected: Houdini {result.GetProperty("version").GetString()} | {result.GetProperty("scene").GetString()}";
