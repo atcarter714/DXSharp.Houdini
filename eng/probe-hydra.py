@@ -1,15 +1,21 @@
-"""Run using the exact Houdini installation's hython, not system Python.
-Optional NativeAOT probe is loaded only into this short-lived process.
-"""
+"""Discover Houdini USD in hython, or independently qualify the AOV DLL in ordinary x64 Python."""
 import argparse, ctypes, json, pathlib
-from pxr import Usd, Plug
 
 parser=argparse.ArgumentParser()
 parser.add_argument("--dll",type=pathlib.Path)
 parser.add_argument("--hardware",action="store_true")
+parser.add_argument("--standalone",action="store_true")
 args=parser.parse_args()
-print(json.dumps({"usdVersion":list(Usd.GetVersion()),
-    "registeredImagingPlugins":[p.name for p in Plug.Registry().GetAllPlugins() if p.name.lower().startswith(("hd","hgi"))]},indent=2),flush=True)
+if args.standalone:
+    if not args.dll:
+        parser.error("--standalone requires --dll")
+    if ctypes.sizeof(ctypes.c_void_p)!=8:
+        raise RuntimeError("The native probe requires x64 Python")
+else:
+    from pxr import Usd, Plug
+    print(json.dumps({"usdVersion":list(Usd.GetVersion()),
+        "registeredImagingPlugins":[p.name for p in Plug.Registry().GetAllPlugins() if p.name.lower().startswith(("hd","hgi"))]},indent=2),flush=True)
+    print("PASS: Houdini USD discovery",flush=True)
 if args.dll:
     dll=ctypes.CDLL(str(args.dll.resolve(strict=True)))
     dll.dxsharp_probe_abi.argtypes=[]
@@ -26,4 +32,5 @@ if args.dll:
         raise RuntimeError(f"DXSharp AOV probe failed: 0x{hr & 0xffffffff:08X}")
     if bytes(buf)!=bytes([0,255,0,255])*(w*h):
         raise RuntimeError("AOV pixel mismatch")
-    print(f"PASS: DXSharp NativeAOT D3D12 clear/readback in hython, {w} x {h} RGBA8.",flush=True)
+    host="standalone Python" if args.standalone else "hython"
+    print(f"PASS: DXSharp NativeAOT D3D12 clear/readback in {host}, {w} x {h} RGBA8.",flush=True)

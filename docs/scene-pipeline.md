@@ -56,13 +56,15 @@ Do NOT install/register a renderer yet. Houdini ships a specific OpenUSD build; 
 pwsh -File eng/probe-hydra.ps1
 # Native SDK header probe (also builds existing native HDK targets):
 pwsh -File eng/build.ps1 -HydraProbe
+# NativeAOT C ABI clear/readback in ordinary x64 Python, independent of Houdini:
+pwsh -File eng/probe-hydra.ps1 -Aov -Standalone
 # NativeAOT C ABI clear/readback, executed in a short-lived hython process:
 pwsh -File eng/probe-hydra.ps1 -Aov
 # After WARP passes, hardware:
 pwsh -File eng/probe-hydra.ps1 -Aov -Hardware
 ```
 
-The C++ probe reports PXR_VERSION, HD_API_VERSION, class sizes and presence of sceneIndex.h. The sizes are diagnostics, not proof of binary ABI compatibility. The NativeAOT project uses the Windows system D3D12 runtime (no Agility selection in the Houdini process), creates a 61x47 offscreen RGBA8 render target, clears it green, reads back the padded footprint, and copies tightly packed RGBA into a caller-owned buffer. The Python host verifies every pixel. This tests native .NET hosting and AOV transport, not a Hydra render delegate or an interactive Houdini GUI. NativeAOT publication requires the Windows C++ toolchain and .NET AOT runtime packs.
+The C++ probe reports PXR_VERSION, HD_API_VERSION, class sizes and presence of sceneIndex.h. The sizes are diagnostics, not proof of binary ABI compatibility. The NativeAOT project uses the Windows system D3D12 runtime (no Agility selection in the Houdini process), creates a 61x47 offscreen RGBA8 render target, clears it green, reads back the padded footprint, and copies tightly packed RGBA into a caller-owned buffer. The Python host verifies every pixel. This tests native .NET hosting and AOV transport, not a Hydra render delegate or an interactive Houdini GUI. NativeAOT publication requires the Visual Studio Desktop development with C++ workload (default components, including a Windows SDK) and .NET AOT runtime packs. The script discovers MSVC using vswhere and imports the x64 developer environment; it stops on a failed publish or missing Python PASS marker. The standalone option requires ordinary x64 Python (optionally specify -Python with its executable path) and tests the D3D12 DLL independently of Houdini. It does not establish Houdini-hosted interoperability. Close any open Houdini sessions if licenses are occupied, and check the License Administrator for a valid server and applicable Indie/Engine entitlement before retrying hython. husk enumeration is separate from a successful license check or rendering test; the discovery command reports a license diagnostic as a failure even if husk exits zero.
 
 Next: select traditional HdRenderDelegate vs Hydra scene-index interface using the actual header report. Build an exact-version C++ plugin that registers an isolated DXSharp renderer id, accepts settings and mesh dirty updates, implements render pass and HdRenderBuffer color/depth AOVs, and invokes shared renderer via versioned C ABI. Qualify husk before Solaris interactive rendering; add pause/stop ownership and COP access only after basic rendering is reliable. No .NET objects or OpenUSD C++ objects cross the C ABI. Start with CPU readback before investigating shared D3D12 surfaces and Hydra/Hgi interoperability.
 
