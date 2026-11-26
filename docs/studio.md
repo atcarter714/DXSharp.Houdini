@@ -2,7 +2,19 @@
 
 This first sample uses Houdini's interactive Python API (HOM), not a HAPI session or HDK plugin. It reads actual cooked SOP geometry and edits numeric parameters through an explicitly started local file bridge. It does not bypass Houdini license restrictions. The preview is a CPU-projected WinUI wireframe, not a DXSharp renderer; GPU rendering and HAPI SessionSync are subsequent work.
 
-## Run
+## Package installation (recommended)
+
+From the repository root:
+
+```powershell
+pwsh -File eng/install-houdini-package.ps1
+```
+
+Restart Houdini, add the DXSharp shelf using the shelf + menu, and click Start Studio Bridge. Launch HoudiniStudio from Visual Studio or with the command below. A single discovered bridge is automatically connected on startup; for multiple sessions, select the instance and click Connect. Discover refreshes the list. Stop Studio Bridge removes the discovery manifest. Manual directory entry remains supported.
+
+The package is separate from Arkaen-Houdini and does not require or modify it. To unregister it, run the installer with -Uninstall and restart Houdini. Use -PreferenceDirectory for nonstandard Houdini preferences.
+
+## Manual fallback
 
 Open Houdini 22.0.514 with an existing scene or an empty scene. In Windows > Python Shell, execute (adjust path if necessary):
 
@@ -26,4 +38,4 @@ hou.session.dxsharp_studio_bridge.stop()
 
 Only start the bridge for trusted local processes under your account. Do not share its temporary directory. Requests are allowlisted but can edit your open scene; use a disposable scene or save a backup. No network listener is started. Operations run on Houdini's UI thread and complex cooks may block it. Requests time out at 60 seconds; timeouts do not guarantee a running cook or edit was cancelled. No automatic scene saving. Geometry preview limits: 100,000 points, 200,000 edges, 20,000 displayed edges; non-polygon primitives are not tessellated. Full-fidelity materials, textures, transforms, and attributes are not implemented.
 
-The project is intentionally separate from the qualified base solution until Windows App SDK build and runtime testing pass. No private assets are included.
+The project is included in the solution. The initial editor was validated interactively; the new package and discovery workflow require a fresh Windows/Houdini test. No private assets are included.
