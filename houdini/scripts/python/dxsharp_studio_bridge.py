@@ -1,5 +1,5 @@
 """Run explicitly inside Houdini's Python Shell. Local, opt-in file IPC."""
-import json, os, pathlib, tempfile, uuid, math, hou
+import json, os, pathlib, tempfile, uuid, math, shutil, atexit, hou
 
 class StudioBridge:
     def __init__(self):
@@ -8,6 +8,7 @@ class StudioBridge:
         self.running = False
         self.busy = False
         self.manifest = self.directory / "session.json"
+        atexit.register(self.cleanup)
 
     def start(self):
         if not self.running:
@@ -21,7 +22,11 @@ class StudioBridge:
         if self.running:
             hou.ui.removeEventLoopCallback(self.callback)
             self.running = False
-        self.manifest.unlink(missing_ok=True)
+        self.cleanup()
+
+    def cleanup(self):
+        # Only remove the unique directory owned by this bridge.
+        shutil.rmtree(self.directory, ignore_errors=True)
 
     def poll(self):
         if self.busy:
@@ -58,6 +63,16 @@ class StudioBridge:
         action = request.get("action")
         if action == "ping":
             return {"version": hou.applicationVersionString(), "scene": hou.hipFile.path()}
+        if action == "project":
+            editor = hou.ui.paneTabOfType(hou.paneTabType.NetworkEditor)
+            names = ("HIP", "HIPNAME", "JOB", "HFS", "HOUDINI_USER_PREF_DIR",
+                     "HOUDINI_PATH", "HOUDINI_OTLSCAN_PATH", "HOUDINI_TEMP_DIR")
+            return {"hipFile": hou.hipFile.path(), "unsaved": hou.hipFile.isNewFile(),
+                    "dirty": hou.hipFile.hasUnsavedChanges(),
+                    "network": editor.pwd().path() if editor else hou.pwd().path(),
+                    "selected": [n.path() for n in hou.selectedNodes()],
+                    "environment": {name: hou.getenv(name, "") for name in names},
+                    "bridge": str(self.directory)}
         if action == "nodes":
             return sorted(n.path() for n in hou.node("/obj").allSubChildren()
                           if isinstance(n, hou.SopNode))
@@ -67,7 +82,8 @@ class StudioBridge:
                 definition = typ.definition()
                 result.append({"name": name, "label": typ.description(), "icon": typ.icon(),
                     "inputs": typ.minNumInputs(), "maxInputs": typ.maxNumInputs(),
-                    "library": definition.libraryFilePath() if definition else ""})
+                    "library": definition.libraryFilePath() if definition else "",
+                    "hidden": typ.hidden(), "deprecated": bool(typ.deprecated())})
             return sorted(result, key=lambda x: x["label"].lower())
         if action == "tools":
             hfs = pathlib.Path(hou.expandString("$HFS"))
@@ -182,7 +198,7 @@ class StudioBridge:
             result = []
             for owner, attrs, elements in (
                 ("Point", geo.pointAttribs(), geo.points()),
-                ("Vertex", geo.vertexAttribs(), None),
+                ("Vertex", geo.vertexAttribs(), tuple(v for p in geo.prims()[:8] for v in p.vertices()[:8])),
                 ("Primitive", geo.primAttribs(), geo.prims()),
                 ("Detail", geo.globalAttribs(), (geo,))):
                 for a in attrs:
@@ -277,6 +293,15 @@ class StudioBridge:
             packed = geo.pointFloatAttribValues('P')
             positions = [list(packed[i:i+3]) for i in range(0, len(packed), 3)]
             indices = {p.number(): i for i, p in enumerate(points)}
+            def point_stream(name, sizes):
+                attrib = geo.findPointAttrib(name)
+                if attrib is None or attrib.dataType() != hou.attribData.Float or attrib.size() not in sizes:
+                    return []
+                values = geo.pointFloatAttribValues(name)
+                return [list(values[i:i+attrib.size()]) for i in range(0, len(values), attrib.size())]
+            colors = point_stream("Cd", (3, 4))
+            normals = point_stream("N", (3,))
+            uvs = point_stream("uv", (2, 3))
             edges = set()
             polygons = 0
             triangles = []
@@ -295,6 +320,8 @@ class StudioBridge:
                                 theta = 2 * math.pi * x / cols
                                 v = hou.Vector3(math.sin(phi)*math.cos(theta), math.cos(phi), math.sin(phi)*math.sin(theta))
                                 positions.append(list(v * matrix + origin))
+                                if colors:
+                                    colors.append(colors[indices[prim.vertices()[0].point().number()]])
                                 i = base + y * cols + x
                                 edges.add((i, base + y * cols + (x+1) % cols))
                                 if y:
@@ -322,7 +349,9 @@ class StudioBridge:
             return {"positions": positions, "edges": sorted(edges),
                     "primitives": len(geo.prims()), "polygons": polygons,
                     "sourcePoints": len(points), "spheres": spheres, "unsupported": unsupported,
-                    "triangles": triangles,
+                    "triangles": triangles, "colors": colors, "normals": normals if len(normals)==len(positions) else [],
+                    "uv": uvs if len(uvs)==len(positions) else [],
+                    "nodeId": node.sessionId(), "scene": hou.hipFile.path(),
                     "revision": node.cookCount()}
         raise ValueError("Unknown action")
 
