@@ -14,7 +14,10 @@ internal sealed class BridgeClient( string directory ) {
         try {
             await File.WriteAllTextAsync( staging, JsonSerializer.Serialize( request ), timeout.Token );
             File.Move( staging, input );
-            while ( !File.Exists( output ) ) await Task.Delay( 100, timeout.Token );
+            while ( !File.Exists( output ) ) {
+                if (!Directory.Exists(_directory)) throw new IOException("Houdini bridge disconnected.");
+                await Task.Delay( 40, timeout.Token );
+            }
             using var doc = JsonDocument.Parse( await File.ReadAllTextAsync( output, timeout.Token ) );
             var root = doc.RootElement;
             if ( !root.GetProperty( "ok" ).GetBoolean() )
@@ -22,9 +25,9 @@ internal sealed class BridgeClient( string directory ) {
             return root.GetProperty( "data" ).Clone();
         }
         finally {
-            File.Delete( staging );
-            File.Delete( input );
-            File.Delete( output );
+            foreach(string file in new[]{staging,input,output}) {
+                try { File.Delete(file); } catch(IOException) { } catch(UnauthorizedAccessException) { }
+            }
         }
     }
 }
