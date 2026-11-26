@@ -118,7 +118,7 @@ def _usd_material(material,time):
         inputs=inputs,graph=graph)
 
 def _inspect_stage(path):
-    from pxr import Usd, UsdGeom, UsdShade
+    from pxr import Usd, UsdGeom, UsdShade, UsdLux
     stage=_usd_stage(path)
     time=Usd.TimeCode(hou.frame())
     cache=UsdGeom.XformCache(time)
@@ -140,6 +140,8 @@ def _inspect_stage(path):
                 faceCount=len(mesh.GetFaceVertexCountsAttr().Get(time) or []),
                 material=str(mat.GetPath()) if mat else "",
                 subsets=[str(x.GetPath()) for x in binding.GetMaterialBindSubsets()])
+        if prim.IsA(UsdGeom.Camera) or prim.HasAPI(UsdLux.LightAPI):
+            item["authoredProperties"]={str(a.GetName()):_usd_value(a.Get(time)) for a in prim.GetAuthoredAttributes()}
         if prim.IsA(UsdShade.Material):
             materials[path]=_usd_material(UsdShade.Material(prim),time)
         objects.append(item)

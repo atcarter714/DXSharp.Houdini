@@ -14,6 +14,7 @@ internal sealed partial class StudioWindow {
     private readonly ComboBox _materials=new(){PlaceholderText="Choose translated material",DisplayMemberPath="Path"};
     private readonly CheckBox _textureSrgb=new(){Content="Decode texture as sRGB",IsChecked=true};
     private readonly CheckBox _flipV=new(){Content="Flip texture V"};
+    private readonly CheckBox _useVertexColor=new(){Content="Multiply by vertex color",IsChecked=true};
     private TexturePayload? _texturePreview;
     private Vector3 _materialTint=Vector3.One,_materialEmission=Vector3.Zero;
     private readonly TextBlock _pipelineReport=new(){TextWrapping=TextWrapping.Wrap};
@@ -27,11 +28,12 @@ internal sealed partial class StudioWindow {
         panel.Children.Add(Button("Load DXAM preview",LoadCompiledAsync));
         panel.Children.Add(new TextBlock{Text="Single-material GPU preview",FontSize=16});
         panel.Children.Add(_materials);
-        panel.Children.Add(_textureSrgb);panel.Children.Add(_flipV);
+        panel.Children.Add(_textureSrgb);panel.Children.Add(_flipV);panel.Children.Add(_useVertexColor);
+        _useVertexColor.Checked+=(_,_)=>Draw();_useVertexColor.Unchecked+=(_,_)=>Draw();
         _flipV.Checked+=(_,_)=>Draw();_flipV.Unchecked+=(_,_)=>Draw();
         panel.Children.Add(Button("Preview selected material",PreviewMaterialAsync));
         panel.Children.Add(Button("Load base-color texture",LoadTextureAsync));
-        panel.Children.Add(Button("Clear material / texture",()=>{_texturePreview=null;_materialTint=Vector3.One;_materialEmission=Vector3.Zero;Draw();return Task.CompletedTask;}));
+        panel.Children.Add(Button("Clear material / texture",()=>{_texturePreview=null;_materialTint=Vector3.One;_materialEmission=Vector3.Zero;_useVertexColor.IsChecked=true;_roughness.Value=.5;_metallic.Value=0;Draw();return Task.CompletedTask;}));
         panel.Children.Add(_copPath);panel.Children.Add(_copOutput);panel.Children.Add(Button("Export COP RGBA32F",ExportCopAsync));
         panel.Children.Add(_pipelineReport);return panel;
     }
@@ -82,7 +84,7 @@ internal sealed partial class StudioWindow {
         string? path=await OpenAssetAsync(".dxam");
         if(path==null)return;
         var mesh=await Task.Run(()=>MeshBlob.Read(path),_lifetime.Token);
-        _live.IsOn=false;DetachView();
+        _live.IsOn=false;_previewPath=null;_nodeId=-1;_pending.Clear();_parameters.Children.Clear();DetachView();
         _points=mesh.Vertices.Select(v=>v.Position).ToArray();
         _normals=mesh.Vertices.Select(v=>v.Normal).ToArray();_uvs=mesh.Vertices.Select(v=>v.UV).ToArray();
         _colors=mesh.Vertices.Select(v=>new Vector3(v.Color.X,v.Color.Y,v.Color.Z)).ToArray();
@@ -96,7 +98,7 @@ internal sealed partial class StudioWindow {
         _pipelineReport.Text=_status.Text=$"Offline DXAM preview: {mesh.Vertices.Length:N0} vertices; reselect a SOP to return to live data.";Draw();
     }
     private async Task<TexturePayload> ReadTextureAsync(string path,bool srgb) {
-        if(!Path.IsPathFullyQualified(path)||!File.Exists(path))
+        if(!Path.IsPathFullyQualified(path)||path.StartsWith(@"\\",StringComparison.Ordinal)||!File.Exists(path))
             throw new InvalidDataException("Only resolved local image files are supported by this preview.");
         if(path.EndsWith(".rgba32f",StringComparison.OrdinalIgnoreCase))
             return await Task.Run(()=>TexturePayload.ReadCop(path,srgb),_lifetime.Token);
@@ -121,10 +123,10 @@ internal sealed partial class StudioWindow {
         if(m.Textures.TryGetValue("baseColor",out var binding)&&binding.Texture is {} a) {
             string path=a.ResolvedPath??throw new InvalidOperationException("Base-color reference is unresolved; export or bake it first.");
             bool srgb=a.ColorSpace?.Equals("sRGB",StringComparison.OrdinalIgnoreCase)==true||
-                (a.ColorSpace is null or "auto"&&_textureSrgb.IsChecked==true);
+                ((a.ColorSpace is null or "auto")&&_textureSrgb.IsChecked==true);
             texture=await ReadTextureAsync(path,srgb);
         }
-        _texturePreview=texture;
+        _texturePreview=texture;_useVertexColor.IsChecked=false;
         _materialTint=new(m.BaseColor.X,m.BaseColor.Y,m.BaseColor.Z);_materialEmission=m.Emission;
         _roughness.Value=m.Roughness;_metallic.Value=m.Metallic;
         _pipelineReport.Text="Preview material: "+m.Path+" (single material override)\n"+string.Join("\n",m.Diagnostics);Draw();

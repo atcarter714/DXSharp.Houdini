@@ -26,6 +26,10 @@ The project deliberately separates Houdini's native SDKs, managed geometry contr
 > [!NOTE]
 > This repository is experimental. `main` contains the initial managed/native interoperability foundation. The [active Studio branch](https://github.com/atcarter714/DXSharp.Houdini/tree/feature/houdini-studio) adds the working interactive HOM bridge and WinUI 3 editor described below. The native HAPI session and cooking pipeline is a separate, not-yet-qualified milestone.
 
+## Scene pipeline development
+
+The [scene-pipeline branch](https://github.com/atcarter714/DXSharp.Houdini/tree/feature/scene-pipeline) adds a first native D3D12 shaded viewport, strict SOP/USD mesh compilation, direct material/texture preview, Copernicus float layer export and opt-in Hydra ABI/AOV probes. These are development changes pending Windows/Houdini qualification. See [the v0.5 workflow](docs/scene-pipeline.md) on that branch.
+
 ## Integration layers
 
 | Layer | Responsibility | Status |

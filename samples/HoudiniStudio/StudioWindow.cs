@@ -65,7 +65,7 @@ internal sealed partial class StudioWindow : Window {
         gpu.Pan=new((float)(2*_panX/_viewport.ActualWidth),(float)(-2*_panY/_viewport.ActualHeight));
         gpu.Exposure=(float)_exposure.Value;gpu.Roughness=(float)_roughness.Value;gpu.Metallic=(float)_metallic.Value;
         gpu.DebugMode=Math.Max(0,_gpuMode.SelectedIndex);
-        gpu.Texture=_texturePreview;gpu.Tint=_materialTint;gpu.Emission=_materialEmission;gpu.FlipV=_flipV.IsChecked==true;
+        gpu.Texture=_texturePreview;gpu.Tint=_materialTint;gpu.Emission=_materialEmission;gpu.FlipV=_flipV.IsChecked==true;gpu.UseVertexColor=_useVertexColor.IsChecked==true;
         _nativeView.Width=_viewport.ActualWidth;_nativeView.Height=_viewport.ActualHeight;
         _nativeView.Visibility=Visibility.Visible;_nativeView.IsSuspended=!_sceneVisible;
         _preview.Visibility=Visibility.Collapsed;
@@ -196,7 +196,7 @@ internal sealed partial class StudioWindow : Window {
         _shading.Items.Add(Mode("Wireframe","\uE80A"));
         _shading.Items.Add(Mode("Shaded","\uE91F"));
         _shading.Items.Add(Mode("Shaded + edges","\uE81E"));
-        _shading.SelectedIndex=2;
+        _shading.SelectedIndex=1;
         var header = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         header.Children.Add(new TextBlock { Text = "DXSHARP / HOUDINI", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = Brush(105,207,219), VerticalAlignment = VerticalAlignment.Center, FontSize = 16 });
         header.Children.Add(_sessions);
@@ -808,7 +808,7 @@ internal sealed partial class StudioWindow : Window {
             _nativeView.IsSuspended=true;_nativeView.Visibility=Visibility.Collapsed;_preview.Visibility=Visibility.Visible;
             _preview.Width=_viewport.ActualWidth; _preview.Height=_viewport.ActualHeight;
             _preview.Source=_raster.Render((int)(_viewport.ActualWidth*factor),(int)(_viewport.ActualHeight*factor),_points,_edges,_triangles,_colors,rotation,_zoom.Value,_panX*factor,_panY*factor,Math.Max(0,_shading.SelectedIndex),_syncedView);
-            _renderTime.Text=$"{watch.Elapsed.TotalMilliseconds:F0} ms · CPU";
+            _renderTime.Text=$"{watch.Elapsed.TotalMilliseconds:F0} ms · CPU"+(_backend.SelectedIndex==0?" fallback":"");
         });
     }
 }

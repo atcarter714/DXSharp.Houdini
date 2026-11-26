@@ -20,6 +20,7 @@ internal sealed class GpuPreview : IDisposable {
     public TexturePayload? Texture { get; set; }
     public Vector3 Tint { get; set; }=Vector3.One;
     public bool FlipV { get; set; }
+    public bool UseVertexColor { get; set; }=true;
     public Vector3 Emission { get; set; }
     private static readonly TexturePayload White=new(1,1,TextureEncoding.Rgba8,[255,255,255,255],false);
     private Mesh? _mesh;
@@ -38,7 +39,7 @@ internal sealed class GpuPreview : IDisposable {
         _device=device;
         using var compiler=new ShaderCompiler();
         string shader=File.ReadAllText(Path.Combine(AppContext.BaseDirectory,"Shaders","Preview.hlsl"));
-        _root=device.CreateTextureRootSignature(44,linearWrap:true);
+        _root=device.CreateTextureRootSignature(48,linearWrap:true);
         try {
             _pipeline=device.CreateGraphicsPipeline(_root,compiler.Compile(shader,"VS","vs_6_0").RequireSuccess(),
                 compiler.Compile(shader,"PS","ps_6_0").RequireSuccess(),[
@@ -81,12 +82,13 @@ internal sealed class GpuPreview : IDisposable {
         var transform=Matrix4x4.CreateTranslation(-_center)*Rotation*
             Matrix4x4.CreateScale(sx,sy,-.45f/_radius)*
             Matrix4x4.CreateTranslation(Pan.X,Pan.Y,.5f);
-        Span<float> constants=stackalloc float[44];
+        Span<float> constants=stackalloc float[48];
         MemoryMarshal.Cast<float,Matrix4x4>(constants[..32])[0]=transform;
         MemoryMarshal.Cast<float,Matrix4x4>(constants[..32])[1]=Rotation;
         constants[32]=Exposure;constants[33]=Roughness;constants[34]=Metallic;constants[35]=DebugMode;
         constants[36]=Tint.X;constants[37]=Tint.Y;constants[38]=Tint.Z;constants[39]=texture.IsSrgb?1:0;
         constants[40]=Emission.X;constants[41]=Emission.Y;constants[42]=Emission.Z;constants[43]=FlipV?1:0;
+        constants[44]=UseVertexColor?1:0;constants[45]=constants[46]=constants[47]=0;
         frame.Commands.SetGraphicsPipeline(_pipeline);
         frame.Commands.SetGraphicsConstants(MemoryMarshal.Cast<float,uint>(constants));
         frame.Commands.SetGraphicsTexture(_texture!,1);

@@ -53,3 +53,25 @@ var material=MaterialProcessor.Translate(new("/mat/rock","UsdPreviewSurface",new
 }));
 Check(material.Textures.ContainsKey("baseColor")&&material.Roughness==.6f&&material.Diagnostics.Length==1,"Material translation.");
 Console.WriteLine("PASS: seam expansion, material translation and DXAM round trip/checksum.");
+
+Throws<InvalidDataException>(()=>GeometryProcessor.Compile(sourceMesh,[new("Cd",AttributeDomain.Point,3,[1,2])]));
+Throws<InvalidDataException>(()=>GeometryProcessor.Compile(new MeshTopology(points,[0,1,2,3],[4]),[]));
+var precedence=GeometryProcessor.Compile(sourceMesh,[
+    new("Cd",AttributeDomain.Detail,3,[1,0,0]),
+    new("Cd",AttributeDomain.Vertex,3,[0,1,0,0,1,0,0,1,0,0,1,0,0,1,0,0,1,0])
+]);
+Check(precedence.Vertices.All(v=>v.Color==new Vector4(0,1,0,1)),"Corner precedence.");
+var tex=new TexturePayload(2,2,TextureEncoding.Rgba8,new byte[16],true);
+tex.Validate();Check(tex.RowPitch==8,"RGBA8 layout.");
+Throws<InvalidDataException>(()=>new TexturePayload(2,2,TextureEncoding.Rgba32Float,new byte[16],false).Validate());
+string raw=Path.Combine(Path.GetTempPath(),Guid.NewGuid()+".rgba32f");
+try {
+    byte[] rgba=new byte[16];
+    File.WriteAllBytes(raw,rgba);
+    File.WriteAllText(raw+".json",System.Text.Json.JsonSerializer.Serialize(new {width=1,height=1,format="R32G32B32A32_FLOAT",rowPitch=16,
+        sha256=Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(rgba))}));
+    Check(TexturePayload.ReadCop(raw).Bytes.SequenceEqual(rgba),"COP payload.");
+    File.WriteAllBytes(raw,new byte[]{1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0});
+    Throws<InvalidDataException>(()=>TexturePayload.ReadCop(raw));
+} finally {File.Delete(raw);File.Delete(raw+".json");}
+Console.WriteLine("PASS: strict geometry, attribute precedence and texture payload verification.");

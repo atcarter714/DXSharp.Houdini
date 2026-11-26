@@ -10,10 +10,10 @@ namespace DXSharp.HydraProbe;
 // USD objects cross this boundary. A synchronous clear/readback proves the
 // minimum color-AOV transport, not Hydra integration or production rendering.
 public static unsafe class AovProbe {
-    [UnmanagedCallersOnly(EntryPoint="dxsharp_probe_abi",CallConvs=[typeof(CallConvCdecl)])]
+    [UnmanagedCallersOnly(EntryPoint="dxsharp_probe_abi",CallConvs=new[] { typeof(CallConvCdecl) })]
     public static int Abi()=>1;
 
-    [UnmanagedCallersOnly(EntryPoint="dxsharp_probe_rgba",CallConvs=[typeof(CallConvCdecl)])]
+    [UnmanagedCallersOnly(EntryPoint="dxsharp_probe_rgba",CallConvs=new[] { typeof(CallConvCdecl) })]
     public static int Render(uint width,uint height,byte* output,nuint capacity,int warp) {
         if(output==null||width==0||height==0||width>2048||height>2048||capacity<(nuint)width*height*4)return -1;
         try {

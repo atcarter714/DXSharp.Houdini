@@ -5,6 +5,7 @@ cbuffer Preview : register(b0) {
     float Exposure, Roughness, Metallic, DebugMode;
     float3 Tint; float TextureSrgb;
     float3 Emission; float FlipV;
+    float UseVertexColor; float3 Padding;
 };
 Texture2D<float4> BaseTexture:register(t0);
 SamplerState LinearWrap:register(s0);
@@ -25,7 +26,7 @@ float4 PS(Varying i,bool front:SV_IsFrontFace):SV_Target {
     if(DebugMode==3){float tile=fmod(abs(floor(i.UV.x*12)+floor(i.UV.y*12)),2);return float4(lerp(.12,.8,tile).xxx,1);}
     float3 tex=max(BaseTexture.Sample(LinearWrap,float2(i.UV.x,FlipV>.5?1-i.UV.y:i.UV.y)).rgb,0);
     if(TextureSrgb>.5)tex=lerp(tex/12.92,pow((tex+.055)/1.055,2.4),step(.04045,tex));
-    base*=tex*Tint;
+    base=lerp(float3(1,1,1),base,UseVertexColor)*tex*Tint;
     float3 v=float3(0,0,1),l=normalize(float3(-.45,.7,1)),h=normalize(v+l);
     float nl=saturate(dot(n,l)),nv=max(saturate(dot(n,v)),.001),nh=saturate(dot(n,h)),vh=saturate(dot(v,h));
     float a=max(.045,Roughness);a*=a;float a2=a*a;

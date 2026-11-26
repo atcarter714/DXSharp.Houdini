@@ -20,7 +20,7 @@ public static class GeometryProcessor {
         var points=source.Points;
         var corners=source.CornerPointIndices;
         var faces=source.FaceCounts;
-        if(faces.ContainsAnyExcept(3))throw new InvalidDataException("Triangulate upstream before compiling.");
+        foreach(int face in faces)if(face!=3)throw new InvalidDataException("Triangulate upstream before compiling.");
         if(faceMaterials!=null&&faceMaterials.Count!=faces.Length)throw new InvalidDataException("Material count differs from face count.");
         var streams=new Dictionary<(string,AttributeDomain),FloatAttribute>();
         foreach(var a in attributes) {
@@ -50,7 +50,10 @@ public static class GeometryProcessor {
             var n=Vector3.Cross(points[b]-points[a],points[d]-points[a]);
             smooth[a]+=n;smooth[b]+=n;smooth[d]+=n;
         }
-        static Vector3 Unit(Vector3 n)=>n.LengthSquared()>1e-20f?Vector3.Normalize(n):Vector3.UnitY;
+        static Vector3 Unit(Vector3 n) {
+            float scale=Math.Max(Math.Abs(n.X),Math.Max(Math.Abs(n.Y),Math.Abs(n.Z)));
+            return float.IsFinite(scale)&&scale>1e-20f?Vector3.Normalize(n/scale):Vector3.UnitY;
+        }
         var vertices=new List<RenderVertex>();
         var index=new Dictionary<RenderVertex,uint>();
         var indices=new uint[corners.Length];

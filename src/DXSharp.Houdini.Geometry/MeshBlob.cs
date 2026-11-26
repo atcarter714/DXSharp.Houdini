@@ -18,7 +18,7 @@ public static class MeshBlob {
             if(!float.IsFinite(f))throw new InvalidDataException("Non-finite vertex.");
         int next=0;
         foreach(var range in mesh.Ranges) {
-            if(range.Material==null||range.StartIndex!=next||range.IndexCount<=0||range.IndexCount%3!=0||range.IndexCount>mesh.Indices.Length-next)
+            if(range==null||range.Material==null||range.StartIndex!=next||range.IndexCount<=0||range.IndexCount%3!=0||range.IndexCount>mesh.Indices.Length-next)
                 throw new InvalidDataException("Invalid draw ranges.");
             next+=range.IndexCount;
         }
@@ -48,7 +48,7 @@ public static class MeshBlob {
         if(stream.Length<64||r.ReadUInt32()!=Magic||r.ReadInt32()!=Version||r.ReadInt32()!=Stride)
             throw new InvalidDataException("Unsupported DXAM header.");
         int nv=r.ReadInt32(),ni=r.ReadInt32(),nm=r.ReadInt32();
-        if(r.ReadInt64()!=0||nv<0||nv>MaxVertices||ni<0||ni>MaxIndices||nm<0||nm>MaxMetadata||
+        if(r.ReadInt64()!=0||nv<0||nv>MaxVertices||ni<0||ni>MaxIndices||ni%3!=0||nm<0||nm>MaxMetadata||
             stream.Length!=32L+nv*(long)Stride+ni*4L+nm+32)throw new InvalidDataException("Invalid DXAM length.");
         var vertices=new RenderVertex[nv];var indices=new uint[ni];var metadata=new byte[nm];
         stream.ReadExactly(MemoryMarshal.AsBytes(vertices.AsSpan()));stream.ReadExactly(MemoryMarshal.AsBytes(indices.AsSpan()));stream.ReadExactly(metadata);
