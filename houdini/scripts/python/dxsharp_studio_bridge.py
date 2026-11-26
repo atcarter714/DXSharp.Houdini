@@ -146,9 +146,27 @@ class StudioBridge:
             viewer = hou.ui.paneTabOfType(hou.paneTabType.SceneViewer)
             if viewer is None:
                 raise ValueError("No Houdini Scene Viewer")
-            camera = viewer.curViewport().defaultCamera()
-            return {"rotation": list(camera.rotation().asTuple()), "pivot": list(camera.pivot()),
-                    "translation": list(camera.translation())}
+            viewport = viewer.curViewport()
+            camera = viewport.defaultCamera()
+            result = {"rotation": list(camera.rotation().asTuple()), "pivot": list(camera.pivot()),
+                      "translation": list(camera.translation()), "viewport": viewport.name(),
+                      "perspective": camera.isPerspective(), "resolution": viewport.resolutionInPixels()}
+            source = hou.node(request.get("path") or "/")
+            if isinstance(source, hou.SopNode):
+                # HOM matrices use row vectors. Compose SOP local -> camera -> viewport pixels.
+                obj = source.parent()
+                while obj is not None and not isinstance(obj, hou.ObjNode):
+                    obj = obj.parent()
+                current = viewer.pwd()
+                to_camera = None
+                if obj is not None and current == obj:
+                    to_camera = (viewport.cameraToModelTransform() * viewport.modelToGeometryTransform()).inverted()
+                elif obj is not None and current.path() == "/obj":
+                    to_camera = obj.worldTransform() * viewport.cameraToModelTransform().inverted()
+                if to_camera is not None:
+                    to_pixels = viewport.ndcToCameraTransform().inverted() * viewport.viewportToNDCTransform().inverted()
+                    result.update({"toCamera": to_camera.asTuple(), "toPixels": to_pixels.asTuple()})
+            return result
         if action in ("create", "import"):
             if action == "import":
                 source = pathlib.Path(request["file"])
@@ -246,6 +264,8 @@ class StudioBridge:
                     result.append(entry)
             return result
         if action == "set_tuple":
+            if "nodeId" in request and (node.sessionId() != request["nodeId"] or hou.hipFile.path() != request.get("scene")):
+                raise ValueError("The node or scene changed; refresh the inspector before editing")
             group = node.parmTuple(request["name"])
             if group is None or any(p.isLocked() or p.isDisabled() or p.isHidden() or p.keyframes() for p in group):
                 raise ValueError("Parameter tuple is not editable")
