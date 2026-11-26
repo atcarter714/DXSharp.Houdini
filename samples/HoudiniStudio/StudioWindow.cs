@@ -182,11 +182,13 @@ internal sealed class StudioWindow : Window {
         leftTabs.Items.Add(new PivotItem { Header="Library", Content=new ScrollViewer { Content=library } });
         var leftPanel = new Border { Background = Brush(25,35,47), CornerRadius = new CornerRadius(8), Child = leftTabs, Padding = new Thickness(6) };
         Grid.SetRow(leftPanel, 1); root.Children.Add(leftPanel);
-        var center = new Grid { RowSpacing = 8 };
+        var center = new Grid { RowSpacing = 8, VerticalAlignment=VerticalAlignment.Stretch };
         center.RowDefinitions.Add(new() { Height = GridLength.Auto });
         center.RowDefinitions.Add(new() { Height = new GridLength(1, GridUnitType.Star) });
         center.RowDefinitions.Add(new() { Height = GridLength.Auto });
         _viewport.Children.Add(_preview);
+        _viewport.HorizontalAlignment=HorizontalAlignment.Stretch;
+        _viewport.VerticalAlignment=VerticalAlignment.Stretch;
         Grid.SetRow(_viewport,1); center.Children.Add(_viewport);
         var camera = new StackPanel { Spacing = 4 };
         var tools = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
@@ -269,12 +271,42 @@ internal sealed class StudioWindow : Window {
         settingsPanel.Children.Add(new TextBlock { Text="Inspector width, shading, preview quality, live edit and camera follow preferences persist on close.", TextWrapping=TextWrapping.Wrap });
         var settingsTab=new TabViewItem { Header="Settings", IsClosable=false, Content=new ScrollViewer { Content=settingsPanel } };
         Grid.SetRow(_status, 2); Grid.SetColumnSpan(_status, 4); root.Children.Add(_status);
-        var workspace=new TabView { IsAddTabButtonVisible=false };
-        workspace.TabItems.Add(new TabViewItem { Header="Scene workspace", IsClosable=false, Content=root });
-        workspace.TabItems.Add(projectTab); workspace.TabItems.Add(settingsTab);
+        // Keep the tab strip in an Auto row and the active workspace in a
+        // finite Star row. TabView's content presenter must not measure our
+        // entire editor at its minimum desired height.
+        var shell=new Grid { Background=Brush(15,22,32), RequestedTheme=ElementTheme.Dark,
+            HorizontalAlignment=HorizontalAlignment.Stretch, VerticalAlignment=VerticalAlignment.Stretch };
+        shell.RowDefinitions.Add(new() { Height=GridLength.Auto });
+        shell.RowDefinitions.Add(new() { Height=new GridLength(1,GridUnitType.Star) });
+        var workspace=new TabView { IsAddTabButtonVisible=false, HorizontalAlignment=HorizontalAlignment.Stretch };
+        var sceneTab=new TabViewItem { Header="Scene workspace", IsClosable=false };
+        var projectPage=(FrameworkElement)projectTab.Content!;
+        var settingsPage=(FrameworkElement)settingsTab.Content!;
+        projectTab.Content=null;
+        settingsTab.Content=null;
+        workspace.TabItems.Add(sceneTab);
+        workspace.TabItems.Add(projectTab);
+        workspace.TabItems.Add(settingsTab);
+        shell.Children.Add(workspace);
+        var pageHost=new Grid { HorizontalAlignment=HorizontalAlignment.Stretch, VerticalAlignment=VerticalAlignment.Stretch };
+        Grid.SetRow(pageHost,1);
+        shell.Children.Add(pageHost);
+        FrameworkElement[] pages=[root,projectPage,settingsPage];
+        foreach(var page in pages) {
+            page.HorizontalAlignment=HorizontalAlignment.Stretch;
+            page.VerticalAlignment=VerticalAlignment.Stretch;
+            page.Visibility=Visibility.Collapsed;
+            pageHost.Children.Add(page);
+        }
+        void SelectWorkspace() {
+            for(int i=0;i<pages.Length;i++)
+                pages[i].Visibility=i==workspace.SelectedIndex?Visibility.Visible:Visibility.Collapsed;
+        }
+        workspace.SelectionChanged+=(_,_)=>SelectWorkspace();
         workspace.SelectedIndex=0;
+        SelectWorkspace();
         settingsButton.Click+=(_,_)=>workspace.SelectedItem=settingsTab;
-        Content=workspace;
+        Content=shell;
         _viewport.SizeChanged += (_, _) => Draw();
         _yaw.ValueChanged += (_, _) => Draw();
         _pitch.ValueChanged += (_, _) => Draw();
