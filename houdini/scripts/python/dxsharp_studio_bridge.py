@@ -1,6 +1,227 @@
 """Run explicitly inside Houdini's Python Shell. Local, opt-in file IPC."""
 import json, os, pathlib, tempfile, uuid, math, shutil, atexit, hou
 
+# Scene extraction is read-only. The strict compile path never fans concave
+# polygons or silently drops unsupported primitives.
+def _compile_sop(node):
+    if not isinstance(node, hou.SopNode):
+        raise ValueError("Select a SOP")
+    geo = node.geometry()
+    points = geo.points()
+    prims = geo.prims()
+    if len(points) > 100000 or len(prims) > 300000:
+        raise ValueError("Interactive compiler limit exceeded")
+    indices = {p.number(): i for i,p in enumerate(points)}
+    corners = []
+    materials = []
+    material = geo.findPrimAttrib("shop_materialpath")
+    owner = node.parent()
+    while owner is not None and not isinstance(owner, hou.ObjNode):
+        owner = owner.parent()
+    default_mat = owner.parm("shop_materialpath") if owner else None
+    default_mat = default_mat.evalAsString() if default_mat else ""
+    for prim in prims:
+        if not isinstance(prim, hou.Polygon) or not prim.isClosed() or len(prim.vertices()) != 3:
+            raise ValueError("Compile requires closed polygon triangles; append a Divide/Triangulate SOP.")
+        corners.extend(indices[v.point().number()] for v in prim.vertices())
+        materials.append(prim.stringAttribValue(material) if material else default_mat)
+    attrs = []
+    for domain, find, values in (
+        ("Point",geo.findPointAttrib,geo.pointFloatAttribValues),
+        ("Vertex",geo.findVertexAttrib,geo.vertexFloatAttribValues),
+        ("Primitive",geo.findPrimAttrib,geo.primFloatAttribValues),
+        ("Detail",geo.findGlobalAttrib,None)):
+        for name in ("N","Cd","uv"):
+            a = find(name)
+            if a is None or a.dataType() != hou.attribData.Float:
+                continue
+            if domain == "Detail":
+                value = geo.attribValue(a)
+                data = list(value) if isinstance(value,(tuple,list)) else [value]
+            else:
+                data = list(values(name))
+            attrs.append(dict(name=name,domain=domain,components=a.size(),values=data))
+    return dict(path=node.path(),positions=[list(p.position()) for p in points],corners=corners,
+        faces=[3]*len(prims),attributes=attrs,materials=materials,
+        localToWorld=list(owner.worldTransform().asTuple()) if owner else None)
+
+def _usd_stage(path):
+    node = hou.node(path)
+    if not isinstance(node, hou.LopNode):
+        raise ValueError("Enter a cooked Solaris LOP path, e.g. /stage/OUT")
+    return node.stage()
+
+def _usd_value(value):
+    from pxr import Sdf
+    if value is None:
+        return None
+    if isinstance(value,Sdf.AssetPath):
+        return dict(identifier=value.path,resolvedPath=value.resolvedPath or None)
+    if isinstance(value,(str,bool,int,float)):
+        return value
+    try:
+        return [_usd_value(v) for v in value]
+    except TypeError:
+        return str(value)
+
+def _usd_material(material,time):
+    from pxr import UsdShade
+    graph = []
+    for prim in material.GetPrim().GetDescendants():
+        shader = UsdShade.Shader(prim)
+        if not shader:
+            continue
+        graph.append(dict(path=str(prim.GetPath()),shaderId=str(shader.GetIdAttr().Get() or ""),
+            inputs=[dict(name=str(i.GetBaseName()),value=_usd_value(i.Get(time)),
+                connections=[str(c) for c in i.GetAttr().GetConnections()])
+                for i in shader.GetInputs()]))
+    # Prefer MaterialX for Karma, then universal preview. Retain complete
+    # connection paths for all directly discovered nodes in the report.
+    surface = None
+    for context in ("mtlx",""):
+        result = material.ComputeSurfaceSource(context)
+        if result and result[0]:
+            surface = result[0]
+            break
+    inputs = {}
+    if surface:
+        for i in surface.GetInputs():
+            name=str(i.GetBaseName())
+            v=_usd_value(i.Get(time))
+            entry={}
+            if isinstance(v,(int,float)) and not isinstance(v,bool):
+                entry["constant"]=[float(v)]
+            elif isinstance(v,list) and all(isinstance(x,(int,float)) for x in v):
+                entry["constant"]=v
+            sources=i.GetAttr().GetConnections()
+            if len(sources)==1:
+                source=surface.GetPrim().GetStage().GetPrimAtPath(sources[0].GetPrimPath())
+                tex=UsdShade.Shader(source)
+                sid=str(tex.GetIdAttr().Get() or "") if tex else ""
+                if sid=="UsdUVTexture" or sid.startswith("ND_image_"):
+                    f=tex.GetInput("file")
+                    asset=_usd_value(f.Get(time)) if f else None
+                    if isinstance(asset,dict):
+                        cs=tex.GetInput("sourceColorSpace")
+                        asset["colorSpace"]=str(cs.Get(time)) if cs and cs.Get(time) is not None else None
+                        entry["texture"]=asset
+                        entry["channel"]=str(sources[0].name).split(":")[-1]
+                        entry["unsupportedConnection"]="Sampler/UV transform, image scale and bias not translated yet"
+                    else:
+                        entry["unsupportedConnection"]=str(sources[0])
+                else:
+                    entry["unsupportedConnection"]=str(sources[0])
+            elif sources:
+                entry["unsupportedConnection"]=", ".join(str(x) for x in sources)
+            inputs[name]=entry
+    return dict(path=str(material.GetPath()),shaderId=str(surface.GetIdAttr().Get() or "") if surface else "",
+        inputs=inputs,graph=graph)
+
+def _inspect_stage(path):
+    from pxr import Usd, UsdGeom, UsdShade
+    stage=_usd_stage(path)
+    time=Usd.TimeCode(hou.frame())
+    cache=UsdGeom.XformCache(time)
+    objects=[]
+    materials={}
+    for prim in stage.Traverse():
+        if len(objects)>=10000:
+            raise ValueError("Stage inspection limit: 10000 prims")
+        path=str(prim.GetPath())
+        item=dict(path=path,type=str(prim.GetTypeName()))
+        if prim.IsA(UsdGeom.Xformable):
+            m=cache.GetLocalToWorldTransform(prim)
+            item["localToWorld"]=[float(m[i][j]) for i in range(4) for j in range(4)]
+        if prim.IsA(UsdGeom.Mesh):
+            mesh=UsdGeom.Mesh(prim)
+            binding=UsdShade.MaterialBindingAPI(prim)
+            mat,_=binding.ComputeBoundMaterial()
+            item.update(pointCount=len(mesh.GetPointsAttr().Get(time) or []),
+                faceCount=len(mesh.GetFaceVertexCountsAttr().Get(time) or []),
+                material=str(mat.GetPath()) if mat else "",
+                subsets=[str(x.GetPath()) for x in binding.GetMaterialBindSubsets()])
+        if prim.IsA(UsdShade.Material):
+            materials[path]=_usd_material(UsdShade.Material(prim),time)
+        objects.append(item)
+    return dict(source=stage.GetRootLayer().identifier,timeCode=time.GetValue(),
+        upAxis=str(UsdGeom.GetStageUpAxis(stage)),metersPerUnit=UsdGeom.GetStageMetersPerUnit(stage),
+        objects=objects,materials=list(materials.values()))
+
+def _compile_usd_mesh(path,prim_path):
+    from pxr import Usd, UsdGeom, UsdShade
+    stage=_usd_stage(path)
+    time=Usd.TimeCode(hou.frame())
+    prim=stage.GetPrimAtPath(prim_path)
+    mesh=UsdGeom.Mesh(prim)
+    if not mesh:
+        raise ValueError("Enter a USD Mesh prim path")
+    points=mesh.GetPointsAttr().Get(time)
+    faces=mesh.GetFaceVertexCountsAttr().Get(time)
+    corners=mesh.GetFaceVertexIndicesAttr().Get(time)
+    if points is None or faces is None or corners is None or any(n!=3 for n in faces):
+        raise ValueError("Triangulated USD mesh required")
+    if len(points)>100000 or len(faces)>300000:
+        raise ValueError("Interactive compiler limit exceeded")
+    if mesh.GetSubdivisionSchemeAttr().Get(time)!="none":
+        raise ValueError("Bake subdivision surfaces to polygon meshes before compiling")
+    if mesh.GetOrientationAttr().Get(time)=="leftHanded":
+        raise ValueError("Convert leftHanded USD winding upstream for this prototype")
+    domains={"constant":"Detail","uniform":"Primitive","vertex":"Point","varying":"Point","faceVarying":"Vertex"}
+    attrs=[]
+    pv=UsdGeom.PrimvarsAPI(prim)
+    for name,source in (("Cd","displayColor"),("uv","st"),("N","normals")):
+        a=pv.GetPrimvar(source)
+        if a:
+            values=a.ComputeFlattened(time)
+            interpolation=str(a.GetInterpolation())
+        elif name=="N":
+            values=mesh.GetNormalsAttr().Get(time)
+            interpolation=str(mesh.GetNormalsInterpolation())
+        else:
+            continue
+        if values is not None and len(values):
+            attrs.append(dict(name=name,domain=domains[interpolation],components=len(values[0]),
+                values=[float(x) for row in values for x in row]))
+    binding=UsdShade.MaterialBindingAPI(prim)
+    mat,_=binding.ComputeBoundMaterial()
+    materials=[str(mat.GetPath()) if mat else ""]*len(faces)
+    for subset in binding.GetMaterialBindSubsets():
+        submat,_=UsdShade.MaterialBindingAPI(subset.GetPrim()).ComputeBoundMaterial()
+        for f in subset.GetIndicesAttr().Get(time) or []:
+            if f<0 or f>=len(faces):
+                raise ValueError("Invalid material subset face")
+            materials[f]=str(submat.GetPath()) if submat else ""
+    m=UsdGeom.XformCache(time).GetLocalToWorldTransform(prim)
+    return dict(path=prim_path,positions=[list(x) for x in points],corners=list(corners),faces=list(faces),
+        attributes=attrs,materials=materials,localToWorld=[float(m[i][j]) for i in range(4) for j in range(4)],
+        upAxis=str(UsdGeom.GetStageUpAxis(stage)),metersPerUnit=UsdGeom.GetStageMetersPerUnit(stage))
+
+def _export_cop(path,output,file):
+    import hashlib
+    node=hou.node(path)
+    if not isinstance(node,hou.CopNode):
+        raise ValueError("Enter a Copernicus node path")
+    target=pathlib.Path(file)
+    if not target.is_absolute() or target.suffix.lower()!=".rgba32f":
+        raise ValueError("Choose an absolute .rgba32f file")
+    with node.layer(output) as layer:
+        w,h=layer.bufferResolution()
+        if not (0<w<=8192 and 0<h<=8192 and w*h<=16777216):
+            raise ValueError("COP export limit: 16M pixels")
+        raw=bytes(layer.allBufferElements(hou.imageLayerStorageType.Float32,4))
+        if len(raw)!=w*h*16:
+            raise ValueError("Unexpected COP byte count")
+        metadata=dict(source=path,output=output,width=w,height=h,format="R32G32B32A32_FLOAT",
+            rowPitch=w*16,sha256=hashlib.sha256(raw).hexdigest(),colorSpace="unspecified",
+            rowOrder="HOM native buffer order; verify orientation",pixelScale=list(layer.pixelScale()))
+    temp=target.with_name(target.name+"."+uuid.uuid4().hex+".tmp")
+    try:
+        temp.write_bytes(raw)
+        os.replace(temp,target)
+    finally:
+        temp.unlink(missing_ok=True)
+    return metadata
+
 class StudioBridge:
     def __init__(self):
         self.directory = pathlib.Path(tempfile.mkdtemp(prefix="dxsharp-houdini-"))
@@ -61,6 +282,14 @@ class StudioBridge:
 
     def dispatch(self, request):
         action = request.get("action")
+        if action == "compile_sop":
+            return _compile_sop(hou.node(request["path"]))
+        if action == "inspect_stage":
+            return _inspect_stage(request["path"])
+        if action == "compile_usd_mesh":
+            return _compile_usd_mesh(request["path"],request["prim"])
+        if action == "export_cop":
+            return _export_cop(request["path"],int(request.get("output",0)),request["file"])
         if action == "ping":
             return {"version": hou.applicationVersionString(), "scene": hou.hipFile.path()}
         if action == "project":

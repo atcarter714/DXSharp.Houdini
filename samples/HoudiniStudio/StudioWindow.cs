@@ -12,7 +12,7 @@ using DXSharp.Houdini.Geometry;
 
 namespace DXSharp.Houdini.Studio;
 
-internal sealed class StudioWindow : Window {
+internal sealed partial class StudioWindow : Window {
     private sealed record SessionEntry(string Directory, int Pid, string Version, string Scene) {
         public override string ToString() => $"Houdini {Version} · PID {Pid} · {System.IO.Path.GetFileName(Scene)}";
     }
@@ -280,6 +280,7 @@ internal sealed class StudioWindow : Window {
         io.Children.Add(Button("… Browse", BrowseAsync));
         io.Children.Add(Button("Import BGEO", ImportAsync));
         io.Children.Add(Button("Export BGEO", ExportAsync));
+        io.Children.Add(Button("Compile DXAM", CompileSopAsync));
         camera.Children.Add(new ScrollViewer { Content=io, HorizontalScrollMode=ScrollMode.Auto, HorizontalScrollBarVisibility=ScrollBarVisibility.Auto, VerticalScrollMode=ScrollMode.Disabled });
         Grid.SetRow(camera, 2); center.Children.Add(camera);
         Grid.SetColumn(center, 1); Grid.SetRow(center, 1); root.Children.Add(center);
@@ -336,6 +337,7 @@ internal sealed class StudioWindow : Window {
         ToolTipService.SetToolTip(splitter,"Drag to resize inspector");
         var projectPanel=new StackPanel { Spacing=8, Padding=new Thickness(16) };
         projectPanel.Children.Add(Button("Refresh project", ReadProjectAsync));
+        projectPanel.Children.Add(BuildPipelinePanel());
         projectPanel.Children.Add(_project);
         var projectTab=new TabViewItem { Header="Project", IsClosable=false, Content=new ScrollViewer { Content=projectPanel } };
         settingsPanel.Width=420;
