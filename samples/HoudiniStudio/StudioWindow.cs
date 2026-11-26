@@ -25,6 +25,27 @@ internal sealed class StudioWindow : Window {
     private int[] _triangles = [];
     private Matrix4x4? _syncedRotation;
     private bool _drawPending;
+    private readonly CheckBox _followView = new() { Content = "Follow Houdini view" };
+    private readonly TextBlock _renderTime = new() { FontSize = 12, Foreground = Brush(141,177,193), VerticalAlignment = VerticalAlignment.Center };
+    private readonly ComboBox _quality = new() { ItemsSource = new[] { "Fast", "Balanced", "Detailed" }, SelectedIndex = 1 };
+    private static string SettingsFile => System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DXSharp", "HoudiniStudio", "settings.json");
+    private sealed record Preferences(int Shading, int Quality, bool Live);
+    private void LoadPreferences() {
+        try {
+            if (!File.Exists(SettingsFile)) return;
+            var p=JsonSerializer.Deserialize<Preferences>(File.ReadAllText(SettingsFile));
+            if (p==null) return;
+            _shading.SelectedIndex=Math.Clamp(p.Shading,0,2);
+            _quality.SelectedIndex=Math.Clamp(p.Quality,0,2);
+            _live.IsOn=p.Live;
+        } catch (IOException) { } catch (UnauthorizedAccessException) { } catch (JsonException) { }
+    }
+    private void SavePreferences() {
+        try {
+            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(SettingsFile)!);
+            File.WriteAllText(SettingsFile,JsonSerializer.Serialize(new Preferences(_shading.SelectedIndex,_quality.SelectedIndex,_live.IsOn)));
+        } catch (IOException) { } catch (UnauthorizedAccessException) { }
+    }
     private sealed record OperatorEntry(string Name, string Label, int Inputs) {
         public override string ToString() => $"{Label} · {Name}";
     }
@@ -71,8 +92,15 @@ internal sealed class StudioWindow : Window {
         header.Children.Add(new TextBlock { Text = "DXSHARP / HOUDINI", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = Brush(105,207,219), VerticalAlignment = VerticalAlignment.Center, FontSize = 16 });
         header.Children.Add(_sessions);
         header.Children.Add(Button("Discover", DiscoverAsync));
-        var advanced = new Flyout { Content = _directory };
-        header.Children.Add(new Button { Content = "⚙", Flyout = advanced });
+        var settingsPanel=new StackPanel { Spacing=10, Width=330 };
+        settingsPanel.Children.Add(new TextBlock { Text="Connection & preview", FontSize=18 });
+        settingsPanel.Children.Add(_directory);
+        settingsPanel.Children.Add(new TextBlock { Text="Preview quality" });
+        settingsPanel.Children.Add(_quality);
+        _quality.SelectionChanged+=(_,_)=>Draw();
+        var advanced = new Flyout { Content = settingsPanel };
+        var settingsButton=new Button { Content = "⚙ Settings", Flyout = advanced, Background=Brush(38,64,80) };
+        header.Children.Add(settingsButton);
         _sessions.SelectionChanged += (_, _) => {
             if (_sessions.SelectedItem is SessionEntry session) _directory.Text = session.Directory;
         };
@@ -94,6 +122,7 @@ internal sealed class StudioWindow : Window {
         _controls.Children.Add(Button("＋ Add operator", AddOperatorAsync));
         _controls.Children.Add(_tools);
         _controls.Children.Add(Button("↓ Install selected HDA", InstallToolAsync));
+        _controls.Children.Add(Button("… Install HDA file", InstallFileAsync));
         _controls.Children.Add(Button("↻ Load operator catalog", LoadCatalogAsync));
         var left = new Grid { RowSpacing = 8 };
         left.RowDefinitions.Add(new() { Height = GridLength.Auto });
@@ -115,10 +144,13 @@ internal sealed class StudioWindow : Window {
         tools.Children.Add(Button("↻ Cook", RecookAsync));
         tools.Children.Add(Button("⇄ Match view", MatchViewAsync));
         tools.Children.Add(_live);
+        tools.Children.Add(_followView);
+        tools.Children.Add(_renderTime);
         camera.Children.Add(tools);
         camera.Children.Add(new TextBlock { Text = "Left drag: orbit   |   Middle/right drag: pan   |   Wheel: zoom" });
         var io = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         io.Children.Add(_file);
+        io.Children.Add(Button("… Browse", BrowseAsync));
         io.Children.Add(Button("Import BGEO", ImportAsync));
         io.Children.Add(Button("Export BGEO", ExportAsync));
         camera.Children.Add(io);
@@ -158,23 +190,28 @@ internal sealed class StudioWindow : Window {
             _drag = p;
             if (_panDrag) { _panX += dx; _panY += dy; Draw(); }
             else {
+                _followView.IsChecked = false;
                 _syncedRotation = null;
                 _yaw.Value = ((_yaw.Value + dx * .5 + 180) % 360 + 360) % 360 - 180;
                 _pitch.Value = Math.Clamp(_pitch.Value + dy * .5, -89, 89);
             }
         };
-        _viewport.PointerReleased += (_, e) => { _drag = null; _viewport.ReleasePointerCapture(e.Pointer); };
+        _viewport.PointerReleased += (_, e) => { _drag = null; _viewport.ReleasePointerCapture(e.Pointer); Draw(); };
         _viewport.PointerCaptureLost += (_, _) => _drag = null;
         _viewport.PointerWheelChanged += (_, e) => {
             _zoom.Value = Math.Clamp(_zoom.Value * Math.Pow(1.12, e.GetCurrentPoint(_viewport).Properties.MouseWheelDelta / 120.0), _zoom.Minimum, _zoom.Maximum);
             e.Handled = true;
         };
         _timer.Tick += async (_, _) => {
-            if (_live.IsOn && _bridge != null && Selected != null && !_busy)
-                await RunAsync(CheckRevisionAsync);
+            if (_bridge != null && !_busy && (_followView.IsChecked==true || (_live.IsOn && Selected!=null)))
+                await RunAsync(async ()=>{
+                    if (_live.IsOn && Selected!=null) await CheckRevisionAsync();
+                    if (_followView.IsChecked==true && _drag==null) await MatchViewAsync();
+                });
         };
         _timer.Start();
-        Closed += (_, _) => { _timer.Stop(); _lifetime.Cancel(); };
+        Closed += (_, _) => { SavePreferences(); _timer.Stop(); _lifetime.Cancel(); };
+        LoadPreferences();
         root.Loaded += async (_, _) => await RunAsync(async () => {
             await DiscoverAsync();
             if (_sessions.Items.Count == 1) await ConnectAsync();
@@ -251,6 +288,14 @@ internal sealed class StudioWindow : Window {
         string path = Selected ?? throw new InvalidOperationException("Select a SOP first.");
         await Request(new { action = "recook", path });
         await InspectAsync();
+    }
+    private async Task BrowseAsync() {
+        var picker=new Windows.Storage.Pickers.FileOpenPicker();
+        picker.FileTypeFilter.Add(".bgeo");
+        picker.FileTypeFilter.Add(".sc");
+        WinRT.Interop.InitializeWithWindow.Initialize(picker,WinRT.Interop.WindowNative.GetWindowHandle(this));
+        var file=await picker.PickSingleFileAsync();
+        if(file!=null) _file.Text=file.Path;
     }
     private string GeometryFile() {
         string file = _file.Text.Trim().Trim('"');
@@ -387,6 +432,16 @@ internal sealed class StudioWindow : Window {
         var result=await Request(new { action="operator", kind=op.Name, path=Selected });
         _filter.Text=""; await RefreshAsync(); _nodes.SelectedItem=result.GetString(); await InspectAsync();
     }
+    private async Task InstallFileAsync() {
+        var picker=new Windows.Storage.Pickers.FileOpenPicker();
+        foreach(string ext in new[]{".hda",".hdalc",".hdanc",".otl"}) picker.FileTypeFilter.Add(ext);
+        WinRT.Interop.InitializeWithWindow.Initialize(picker,WinRT.Interop.WindowNative.GetWindowHandle(this));
+        var file=await picker.PickSingleFileAsync();
+        if(file==null) return;
+        var result=await Request(new { action="install_hda",file=file.Path });
+        await LoadCatalogAsync();
+        _status.Text="Installed: "+string.Join(", ",result.EnumerateArray().Select(x=>x.GetString()));
+    }
     private async Task InstallToolAsync() {
         var tool=_tools.SelectedItem as ToolEntry??throw new InvalidOperationException("Select a SideFX tool.");
         var result=await Request(new { action="install_hda", file=tool.File });
@@ -401,8 +456,8 @@ internal sealed class StudioWindow : Window {
     private async Task MatchViewAsync() {
         var view=await Request(new { action="view" });
         var m=view.GetProperty("rotation").EnumerateArray().Select(x=>x.GetSingle()).ToArray();
-        _syncedRotation=Matrix4x4.Transpose(new Matrix4x4(m[0],m[1],m[2],0,m[3],m[4],m[5],0,m[6],m[7],m[8],0,0,0,0,1));
-        Draw();
+        var rotation=Matrix4x4.Transpose(new Matrix4x4(m[0],m[1],m[2],0,m[3],m[4],m[5],0,m[6],m[7],m[8],0,0,0,0,1));
+        if(_syncedRotation!=rotation) { _syncedRotation=rotation; Draw(); }
     }
     private void Draw() {
         if(_drawPending || _viewport.ActualWidth<=0 || _viewport.ActualHeight<=0) return;
@@ -410,10 +465,13 @@ internal sealed class StudioWindow : Window {
         DispatcherQueue.TryEnqueue(()=>{
             _drawPending=false;
             if(_viewport.ActualWidth<=0||_viewport.ActualHeight<=0)return;
-            double factor=Math.Min(1,Math.Min(1280/_viewport.ActualWidth,900/_viewport.ActualHeight));
+            int limit=_drag!=null?640:_quality.SelectedIndex switch { 0=>640, 2=>1280, _=>960 };
+            double factor=Math.Min(1,Math.Min(limit/_viewport.ActualWidth,limit*.75/_viewport.ActualHeight));
+            var watch=System.Diagnostics.Stopwatch.StartNew();
             var rotation=_syncedRotation??(Matrix4x4.CreateRotationY((float)(_yaw.Value*Math.PI/180))*Matrix4x4.CreateRotationX((float)(_pitch.Value*Math.PI/180)));
             _preview.Width=_viewport.ActualWidth; _preview.Height=_viewport.ActualHeight;
             _preview.Source=_raster.Render((int)(_viewport.ActualWidth*factor),(int)(_viewport.ActualHeight*factor),_points,_edges,_triangles,rotation,_zoom.Value,_panX*factor,_panY*factor,Math.Max(0,_shading.SelectedIndex));
+            _renderTime.Text=$"{watch.Elapsed.TotalMilliseconds:F0} ms · CPU";
         });
     }
 }
