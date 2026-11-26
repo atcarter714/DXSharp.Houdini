@@ -170,7 +170,7 @@ internal sealed class StudioWindow : Window {
         }
         _sessions.ItemsSource = sessions.OrderBy(x => x.Pid).ToArray();
         if (sessions.Count == 1) _sessions.SelectedIndex = 0;
-        _status.Text = sessions.Count == 0 ? "No active bridge. Start Studio Bridge from the DXSharp shelf in Houdini." : $"{sessions.Count} Houdini session(s) found.";
+        _status.Text = sessions.Count == 0 ? "No active bridge. Connect from the DXSharp shelf in Houdini." : $"{sessions.Count} Houdini session(s) found.";
         return Task.CompletedTask;
     }
     private async Task ConnectAsync() {
@@ -199,6 +199,7 @@ internal sealed class StudioWindow : Window {
     }
     private async Task CheckRevisionAsync() {
         string path = Selected!;
+        if (_parameters.Children.OfType<Grid>().Any(g => g.Children.OfType<TextBox>().Any(t => t.FocusState != FocusState.Unfocused))) return;
         var result = await Request(new { action = "revision", path });
         if (Selected == path && (_previewPath != path || _revision != result.GetProperty("cook").GetInt32()))
             await InspectAsync();
@@ -242,7 +243,10 @@ internal sealed class StudioWindow : Window {
             new Vector3(p[0].GetSingle(), p[1].GetSingle(), p[2].GetSingle())).ToArray();
         _edges = data.GetProperty("edges").EnumerateArray().Select(e => (e[0].GetInt32(), e[1].GetInt32())).ToArray();
         Draw();
-        _status.Text = $"{path} | {_points.Length:N0} points | {data.GetProperty("primitives").GetInt32():N0} primitives | {_edges.Length:N0} polygon edges";
+        int sourcePoints = data.TryGetProperty("sourcePoints", out var source) ? source.GetInt32() : _points.Length;
+        int unsupported = data.TryGetProperty("unsupported", out var skipped) ? skipped.GetInt32() : 0;
+        _status.Text = $"{path} | {sourcePoints:N0} source points | {data.GetProperty("primitives").GetInt32():N0} primitives | {_edges.Length:N0} preview edges | Cook {_revision}" +
+            (unsupported > 0 ? $" | {unsupported} unsupported primitives" : "");
         var parms = await Request(new { action = "parameters", path });
         if (Selected != path) return;
         _parameters.Children.Clear();
