@@ -42,6 +42,8 @@ internal sealed class StudioWindow : Window {
     private readonly List<OperatorEntry> _operatorList = [];
     private int[] _triangles = [];
     private Matrix4x4? _syncedRotation;
+    private SyncedView? _syncedView;
+    private readonly TextBlock _viewStatus=new() { Text="Local camera", Foreground=Brush(141,177,193), FontSize=12 };
     private bool _drawPending;
     private readonly CheckBox _followView = new() { Content = "Follow Houdini view" };
     private readonly TextBlock _renderTime = new() { FontSize = 12, Foreground = Brush(141,177,193), VerticalAlignment = VerticalAlignment.Center };
@@ -182,12 +184,12 @@ internal sealed class StudioWindow : Window {
         var tools = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         tools.Children.Add(_shading);
         _shading.SelectionChanged += (_, _) => Draw();
-        tools.Children.Add(Button("◎ Frame", () => { _panX = _panY = 0; _zoom.Value = 1; Draw(); return Task.CompletedTask; }));
+        tools.Children.Add(Button("◎ Frame", () => { DetachView(); _panX = _panY = 0; _zoom.Value = 1; Draw(); return Task.CompletedTask; }));
         tools.Children.Add(Button("↻ Cook", RecookAsync));
         tools.Children.Add(Button("⇄ Match view", MatchViewAsync));
         center.Children.Add(new ScrollViewer { Content=tools, HorizontalScrollMode=ScrollMode.Auto, HorizontalScrollBarVisibility=ScrollBarVisibility.Auto, VerticalScrollMode=ScrollMode.Disabled });
         var sync = new StackPanel { Orientation=Orientation.Horizontal, Spacing=10 };
-        sync.Children.Add(_live); sync.Children.Add(_followView); sync.Children.Add(_renderTime);
+        sync.Children.Add(_live); sync.Children.Add(_followView); sync.Children.Add(_renderTime); sync.Children.Add(_viewStatus);
         camera.Children.Add(new ScrollViewer { Content=sync, HorizontalScrollMode=ScrollMode.Auto, HorizontalScrollBarVisibility=ScrollBarVisibility.Auto, VerticalScrollMode=ScrollMode.Disabled });
         camera.Children.Add(new TextBlock { Text = "Left drag: orbit   |   Middle/right drag: pan   |   Wheel: zoom" });
         var io = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
@@ -258,6 +260,7 @@ internal sealed class StudioWindow : Window {
         };
         _viewport.PointerPressed += (_, e) => {
             var p = e.GetCurrentPoint(_viewport);
+            DetachView();
             _drag = p.Position;
             _panDrag = p.Properties.IsMiddleButtonPressed || p.Properties.IsRightButtonPressed;
             _viewport.CapturePointer(e.Pointer);
@@ -270,7 +273,6 @@ internal sealed class StudioWindow : Window {
             _drag = p;
             if (_panDrag) { _panX += dx; _panY += dy; Draw(); }
             else {
-                _followView.IsChecked = false;
                 _syncedRotation = null;
                 _yaw.Value = ((_yaw.Value + dx * .5 + 180) % 360 + 360) % 360 - 180;
                 _pitch.Value = Math.Clamp(_pitch.Value + dy * .5, -89, 89);
@@ -279,6 +281,7 @@ internal sealed class StudioWindow : Window {
         _viewport.PointerReleased += (_, e) => { _drag = null; _viewport.ReleasePointerCapture(e.Pointer); Draw(); };
         _viewport.PointerCaptureLost += (_, _) => _drag = null;
         _viewport.PointerWheelChanged += (_, e) => {
+            DetachView();
             _zoom.Value = Math.Clamp(_zoom.Value * Math.Pow(1.12, e.GetCurrentPoint(_viewport).Properties.MouseWheelDelta / 120.0), _zoom.Minimum, _zoom.Maximum);
             e.Handled = true;
         };
@@ -286,10 +289,11 @@ internal sealed class StudioWindow : Window {
             if (_bridge != null && !_busy && (_followView.IsChecked==true || (_live.IsOn && Selected!=null) || (_autoApply.IsChecked==true && _pending.Count>0)))
                 await RunAsync(async ()=>{
                     if (_autoApply.IsChecked==true && _pending.Count>0 && DateTime.UtcNow-_lastEdit>TimeSpan.FromMilliseconds(350)) await FlushEditsAsync();
-                    if (_live.IsOn && Selected!=null) await CheckRevisionAsync();
                     if (_followView.IsChecked==true && _drag==null) await MatchViewAsync();
+                    if (_live.IsOn && Selected!=null) await CheckRevisionAsync();
                 });
         };
+        _followView.Checked+=async (_,_)=>{if(_bridge!=null) await RunAsync(MatchViewAsync);};
         _timer.Start();
         Closed += (_, _) => { SavePreferences(); _timer.Stop(); _lifetime.Cancel(); };
         LoadPreferences();
@@ -363,7 +367,7 @@ internal sealed class StudioWindow : Window {
         var result = await candidate.RequestAsync(new { action = "ping" }, _lifetime.Token);
         _bridge = candidate;
         _revision = -1;
-        _previewPath = null; _pending.Clear(); _nodeId=-1; _scene=null;
+        _previewPath = null; _pending.Clear(); _nodeId=-1; _scene=null; _syncedView=null; _syncedRotation=null;
         _status.Text = $"Connected: Houdini {result.GetProperty("version").GetString()} | {result.GetProperty("scene").GetString()}";
         await RefreshAsync();
         await ReadProjectAsync();
@@ -621,11 +625,24 @@ internal sealed class StudioWindow : Window {
         var data=await Request(new { action="attributes",path });
         _attributeText.Text=string.Join("\n\n",data.EnumerateArray().Select(x=>$"{x.GetProperty("owner").GetString()} / {x.GetProperty("name").GetString()} [{x.GetProperty("type").GetString()} × {x.GetProperty("size").GetInt32()}]\n"+string.Join("\n",x.GetProperty("values").EnumerateArray().Select(v=>v.GetString()))));
     }
+    private void DetachView() { _followView.IsChecked=false; _syncedView=null; _syncedRotation=null; _viewStatus.Text="Local camera"; }
+    private static Matrix4x4 ReadMatrix(JsonElement data) {
+        var m=data.EnumerateArray().Select(x=>x.GetSingle()).ToArray();
+        if(m.Length!=16) throw new InvalidDataException("Expected a 4x4 matrix.");
+        return new(m[0],m[1],m[2],m[3],m[4],m[5],m[6],m[7],m[8],m[9],m[10],m[11],m[12],m[13],m[14],m[15]);
+    }
     private async Task MatchViewAsync() {
-        var view=await Request(new { action="view" });
+        var view=await Request(new { action="view", path=Selected });
         var m=view.GetProperty("rotation").EnumerateArray().Select(x=>x.GetSingle()).ToArray();
         var rotation=Matrix4x4.Transpose(new Matrix4x4(m[0],m[1],m[2],0,m[3],m[4],m[5],0,m[6],m[7],m[8],0,0,0,0,1));
-        if(_syncedRotation!=rotation) { _syncedRotation=rotation; Draw(); }
+        SyncedView? projected=null;
+        if(view.TryGetProperty("toCamera",out var camera)&&view.TryGetProperty("toPixels",out var pixels)) {
+            var size=view.GetProperty("resolution").EnumerateArray().Select(x=>x.GetInt32()).ToArray();
+            if(size.Length==2 && size[0]>0 && size[1]>0)
+                projected=new(ReadMatrix(camera),ReadMatrix(pixels),size[0],size[1],view.GetProperty("perspective").GetBoolean());
+        }
+        _viewStatus.Text=(_followView.IsChecked==true?"Following ":"Matched ")+(view.GetProperty("viewport").GetString()??"Houdini")+(projected.HasValue?" · camera + projection":" · orientation only");
+        if(_syncedRotation!=rotation||_syncedView!=projected) { _syncedRotation=rotation; _syncedView=projected; Draw(); }
     }
     private void Draw() {
         if(_drawPending || _viewport.ActualWidth<=0 || _viewport.ActualHeight<=0) return;
@@ -638,7 +655,7 @@ internal sealed class StudioWindow : Window {
             var watch=System.Diagnostics.Stopwatch.StartNew();
             var rotation=_syncedRotation??(Matrix4x4.CreateRotationY((float)(_yaw.Value*Math.PI/180))*Matrix4x4.CreateRotationX((float)(_pitch.Value*Math.PI/180)));
             _preview.Width=_viewport.ActualWidth; _preview.Height=_viewport.ActualHeight;
-            _preview.Source=_raster.Render((int)(_viewport.ActualWidth*factor),(int)(_viewport.ActualHeight*factor),_points,_edges,_triangles,_colors,rotation,_zoom.Value,_panX*factor,_panY*factor,Math.Max(0,_shading.SelectedIndex));
+            _preview.Source=_raster.Render((int)(_viewport.ActualWidth*factor),(int)(_viewport.ActualHeight*factor),_points,_edges,_triangles,_colors,rotation,_zoom.Value,_panX*factor,_panY*factor,Math.Max(0,_shading.SelectedIndex),_syncedView);
             _renderTime.Text=$"{watch.Elapsed.TotalMilliseconds:F0} ms · CPU";
         });
     }
