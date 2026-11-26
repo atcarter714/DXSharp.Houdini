@@ -32,9 +32,10 @@ internal sealed class StudioWindow : Window {
     private readonly SemaphoreSlim _operationGate=new(1,1);
     private bool _started;
     private readonly Dictionary<string,TreeViewNode> _treeNodes=new(StringComparer.Ordinal);
-    private sealed record SceneEntry(string Path,bool IsSop) {
-        public override string ToString()=>Path.Split('/').Last();
+    private sealed record SceneEntry(string Path,bool IsSop,string Category="",string Type="",string ChildCategory="",string[]? Inputs=null) {
+        public override string ToString()=>Path.Split('/').Last()+(string.IsNullOrEmpty(Type)?"":$" · {Type}");
     }
+    private readonly Dictionary<string,SceneEntry> _sceneEntries=new(StringComparer.Ordinal);
     private readonly ComboBox _operators = new() { PlaceholderText = "Select SOP operator", MaxWidth = 245 };
     private readonly TextBox _operatorFilter = new() { PlaceholderText = "Search operator types..." };
     private readonly ComboBox _tools = new() { PlaceholderText = "SideFX HDA tools", MaxWidth = 245 };
@@ -101,11 +102,18 @@ internal sealed class StudioWindow : Window {
     private (int A, int B)[] _edges = [];
     private string? Selected => _nodes.SelectedNode?.Content is SceneEntry { IsSop:true } n?n.Path:null;
     private string? Network => _nodes.SelectedNode?.Content is SceneEntry n ? n.IsSop?n.Path[..n.Path.LastIndexOf('/')]:n.Path : null;
+    private void UpdateContext() {
+        string network=Network??"/obj";
+        string category=_sceneEntries.TryGetValue(network,out var entry)?entry.ChildCategory:"";
+        _context.Text=(string.IsNullOrEmpty(category)?"Network":category)+" · "+network;
+        if(_nodes.SelectedNode?.Content is SceneEntry node && node.Inputs?.Length>0)
+            _context.Text+="\nInputs: "+string.Join(", ",node.Inputs.Select(x=>x.Split('/').Last()));
+    }
     private void SelectPath(string? path) {
         if(path!=null && _treeNodes.TryGetValue(path,out var node)) {
             for(var parent=node.Parent;parent!=null;parent=parent.Parent) parent.IsExpanded=true;
             _nodes.SelectedNode=node;
-            _context.Text="SOP · "+(Network??"/obj");
+            UpdateContext();
         }
     }
 
@@ -191,7 +199,7 @@ internal sealed class StudioWindow : Window {
         var sync = new StackPanel { Orientation=Orientation.Horizontal, Spacing=10 };
         sync.Children.Add(_live); sync.Children.Add(_followView); sync.Children.Add(_renderTime); sync.Children.Add(_viewStatus);
         camera.Children.Add(new ScrollViewer { Content=sync, HorizontalScrollMode=ScrollMode.Auto, HorizontalScrollBarVisibility=ScrollBarVisibility.Auto, VerticalScrollMode=ScrollMode.Disabled });
-        camera.Children.Add(new TextBlock { Text = "Left drag: orbit   |   Middle/right drag: pan   |   Wheel: zoom" });
+        camera.Children.Add(new TextBlock { Text = "Left drag: orbit  |  Middle/right: pan  |  Wheel: zoom  |  Ctrl+wheel: inspector" });
         var io = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         io.Children.Add(_file);
         io.Children.Add(Button("… Browse", BrowseAsync));
@@ -209,8 +217,28 @@ internal sealed class StudioWindow : Window {
         inspector.Children.Add(_autoApply);
         inspector.Children.Add(_parameters);
         var scroll = new ScrollViewer { Content = inspector, VerticalScrollBarVisibility=ScrollBarVisibility.Visible, HorizontalScrollMode=ScrollMode.Disabled, Padding=new Thickness(0,0,10,0) };
+        // Separate large scroll target from WinUI's narrow overlay scrollbar.
+        var scrollBar=new Microsoft.UI.Xaml.Controls.Primitives.ScrollBar { Orientation=Orientation.Vertical, Width=16, Minimum=0, SmallChange=48 };
+        var inspectorGrid=new Grid { ColumnSpacing=4 };
+        inspectorGrid.ColumnDefinitions.Add(new() { Width=new GridLength(1,GridUnitType.Star) });
+        inspectorGrid.ColumnDefinitions.Add(new() { Width=GridLength.Auto });
+        inspectorGrid.Children.Add(scroll); Grid.SetColumn(scrollBar,1); inspectorGrid.Children.Add(scrollBar);
+        scroll.VerticalScrollBarVisibility=ScrollBarVisibility.Hidden;
+        bool updatingScroll=false;
+        void UpdateScroll() {
+            updatingScroll=true;
+            scrollBar.Maximum=Math.Max(0,scroll.ScrollableHeight);
+            scrollBar.ViewportSize=scroll.ViewportHeight;
+            scrollBar.LargeChange=Math.Max(48,scroll.ViewportHeight*.8);
+            scrollBar.Value=scroll.VerticalOffset;
+            updatingScroll=false;
+        }
+        scroll.ViewChanged+=(_,_)=>UpdateScroll();
+        scroll.SizeChanged+=(_,_)=>UpdateScroll();
+        inspector.SizeChanged+=(_,_)=>UpdateScroll();
+        scrollBar.ValueChanged+=(_,e)=>{if(!updatingScroll)scroll.ChangeView(null,e.NewValue,null,true);};
         var tabs = new Pivot();
-        tabs.Items.Add(new PivotItem { Header = "Parameters", Content = scroll });
+        tabs.Items.Add(new PivotItem { Header = "Parameters", Content = inspectorGrid });
         var attrs = new StackPanel { Spacing = 8, Padding = new Thickness(8) };
         attrs.Children.Add(Button("↻ Read attributes", ReadAttributesAsync));
         attrs.Children.Add(_attributeText);
@@ -254,7 +282,7 @@ internal sealed class StudioWindow : Window {
             if(e.InvokedItem is TreeViewNode n) _nodes.SelectedNode=n;
             else if(e.InvokedItem is SceneEntry entry) SelectPath(entry.Path);
             _attributeText.Text="";
-            _context.Text="SOP · "+(Network??"/obj");
+            UpdateContext();
             if(Selected!=null) await RunAsync(InspectAsync);
             else { _points=[]; _edges=[]; _triangles=[]; _colors=[]; _parameters.Children.Clear(); Draw(); }
         };
@@ -281,6 +309,9 @@ internal sealed class StudioWindow : Window {
         _viewport.PointerReleased += (_, e) => { _drag = null; _viewport.ReleasePointerCapture(e.Pointer); Draw(); };
         _viewport.PointerCaptureLost += (_, _) => _drag = null;
         _viewport.PointerWheelChanged += (_, e) => {
+            if(Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(Windows.System.VirtualKey.Control).HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down)) {
+                scroll.ChangeView(null,Math.Clamp(scroll.VerticalOffset-e.GetCurrentPoint(_viewport).Properties.MouseWheelDelta,0,scroll.ScrollableHeight),null,true); e.Handled=true; return;
+            }
             DetachView();
             _zoom.Value = Math.Clamp(_zoom.Value * Math.Pow(1.12, e.GetCurrentPoint(_viewport).Properties.MouseWheelDelta / 120.0), _zoom.Minimum, _zoom.Maximum);
             e.Handled = true;
@@ -374,8 +405,14 @@ internal sealed class StudioWindow : Window {
     }
     private async Task RefreshAsync() {
         string? selected = _nodes.SelectedNode?.Content is SceneEntry entry?entry.Path:null;
-        var result = await Request(new { action = "nodes" });
-        _allNodes = result.EnumerateArray().Select(x => x.GetString()!).ToArray();
+        var result = await Request(new { action = "scene_graph" });
+        _sceneEntries.Clear();
+        foreach(var n in result.EnumerateArray()) {
+            var entry=new SceneEntry(n.GetProperty("path").GetString()!,n.GetProperty("isSop").GetBoolean(),n.GetProperty("category").GetString()!,
+                n.GetProperty("type").GetString()!,n.GetProperty("childCategory").GetString()!,n.GetProperty("inputs").EnumerateArray().Select(i=>i.GetString()!).ToArray());
+            _sceneEntries[entry.Path]=entry;
+        }
+        _allNodes = _sceneEntries.Keys.Order(StringComparer.Ordinal).ToArray();
         FilterNodes();
         SelectPath(selected);
     }
@@ -383,14 +420,13 @@ internal sealed class StudioWindow : Window {
         string? selected = _nodes.SelectedNode?.Content is SceneEntry entry?entry.Path:null;
         var expanded=_treeNodes.Where(x=>x.Value.IsExpanded).Select(x=>x.Key).ToHashSet(StringComparer.Ordinal);
         _nodes.RootNodes.Clear(); _treeNodes.Clear();
-        var leaves=_allNodes.ToHashSet(StringComparer.Ordinal);
         foreach(string path in _allNodes.Where(x=>x.Contains(_filter.Text,StringComparison.OrdinalIgnoreCase))) {
             TreeViewNode? parent=null;
             string prefix="";
             foreach(string part in path.Split('/',StringSplitOptions.RemoveEmptyEntries)) {
                 prefix+="/"+part;
                 if(!_treeNodes.TryGetValue(prefix,out var node)) {
-                    node=new TreeViewNode { Content=new SceneEntry(prefix,leaves.Contains(prefix)), IsExpanded=prefix=="/obj"||expanded.Contains(prefix) };
+                    node=new TreeViewNode { Content=_sceneEntries.GetValueOrDefault(prefix)??new SceneEntry(prefix,false), IsExpanded=prefix=="/obj"||expanded.Contains(prefix) };
                     _treeNodes.Add(prefix,node);
                     if(parent==null) _nodes.RootNodes.Add(node); else parent.Children.Add(node);
                 }
@@ -582,7 +618,7 @@ internal sealed class StudioWindow : Window {
     private async Task ReadProjectAsync() {
         var data=await Request(new { action="project" });
         _project.Text=JsonSerializer.Serialize(data,new JsonSerializerOptions { WriteIndented=true });
-        _context.Text="SOP · "+data.GetProperty("network").GetString();
+        _context.Text="Houdini active network: "+data.GetProperty("network").GetString();
     }
     private void FilterOperators() {
         var matches=_operatorList.Where(x=>(_legacy.IsChecked==true||(!x.Hidden&&!x.Deprecated))&&(x.Name.Contains(_operatorFilter.Text,StringComparison.OrdinalIgnoreCase)||x.Label.Contains(_operatorFilter.Text,StringComparison.OrdinalIgnoreCase))).ToArray();
