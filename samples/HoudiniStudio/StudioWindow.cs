@@ -16,7 +16,7 @@ internal sealed class StudioWindow : Window {
     private readonly ComboBox _sessions = new() { PlaceholderText = "Discover Houdini sessions", MinWidth = 220 };
     private readonly PreviewRasterizer _raster = new();
     private readonly Image _preview = new() { Stretch = Stretch.Fill, IsHitTestVisible = false };
-    private readonly RadioButtons _shading = new() { MaxColumns=3, SelectedIndex=2 };
+    private readonly RadioButtons _shading = new() { MaxColumns=3 };
     private readonly CheckBox _legacy = new() { Content="Include hidden / deprecated" };
     private readonly TextBlock _catalogCount = new() { FontSize=12, Foreground=Brush(141,177,193) };
     private readonly TextBlock _context = new() { Text="SOP · /obj", TextWrapping=TextWrapping.Wrap };
@@ -29,6 +29,8 @@ internal sealed class StudioWindow : Window {
     private string? _scene;
     private double _inspectorWidth=420;
     private readonly ColumnDefinition _inspectorColumn=new() { Width=new GridLength(420), MinWidth=300 };
+    private readonly SemaphoreSlim _operationGate=new(1,1);
+    private bool _started;
     private readonly Dictionary<string,TreeViewNode> _treeNodes=new(StringComparer.Ordinal);
     private sealed record SceneEntry(string Path,bool IsSop) {
         public override string ToString()=>Path.Split('/').Last();
@@ -99,8 +101,9 @@ internal sealed class StudioWindow : Window {
     private string? Network => _nodes.SelectedNode?.Content is SceneEntry n ? n.IsSop?n.Path[..n.Path.LastIndexOf('/')]:n.Path : null;
     private void SelectPath(string? path) {
         if(path!=null && _treeNodes.TryGetValue(path,out var node)) {
-            _nodes.SelectedNode=node;
             for(var parent=node.Parent;parent!=null;parent=parent.Parent) parent.IsExpanded=true;
+            _nodes.SelectedNode=node;
+            _context.Text="SOP · "+(Network??"/obj");
         }
     }
 
@@ -232,6 +235,7 @@ internal sealed class StudioWindow : Window {
         settingsPanel.Width=420;
         settingsPanel.Children.Add(Button("Save settings",()=>{SavePreferences(); _status.Text="Settings saved: "+SettingsFile; return Task.CompletedTask;}));
         settingsPanel.Children.Add(new TextBlock { Text=SettingsFile, TextWrapping=TextWrapping.Wrap });
+        settingsPanel.Children.Add(new TextBlock { Text="Inspector width, shading, preview quality, live edit and camera follow preferences persist on close.", TextWrapping=TextWrapping.Wrap });
         var settingsTab=new TabViewItem { Header="Settings", IsClosable=false, Content=new ScrollViewer { Content=settingsPanel } };
         Grid.SetRow(_status, 2); Grid.SetColumnSpan(_status, 4); root.Children.Add(_status);
         var workspace=new TabView { IsAddTabButtonVisible=false };
@@ -246,9 +250,11 @@ internal sealed class StudioWindow : Window {
         _zoom.ValueChanged += (_, _) => Draw();
         _nodes.ItemInvoked += async (_,e) => {
             if(e.InvokedItem is TreeViewNode n) _nodes.SelectedNode=n;
+            else if(e.InvokedItem is SceneEntry entry) SelectPath(entry.Path);
             _attributeText.Text="";
             _context.Text="SOP · "+(Network??"/obj");
-            if(!_busy && Selected!=null) await RunAsync(InspectAsync);
+            if(Selected!=null) await RunAsync(InspectAsync);
+            else { _points=[]; _edges=[]; _triangles=[]; _colors=[]; _parameters.Children.Clear(); Draw(); }
         };
         _viewport.PointerPressed += (_, e) => {
             var p = e.GetCurrentPoint(_viewport);
@@ -287,10 +293,10 @@ internal sealed class StudioWindow : Window {
         _timer.Start();
         Closed += (_, _) => { SavePreferences(); _timer.Stop(); _lifetime.Cancel(); };
         LoadPreferences();
-        root.Loaded += async (_, _) => await RunAsync(async () => {
-            await DiscoverAsync();
-            if (_sessions.Items.Count == 1) await ConnectAsync();
-        });
+        root.Loaded += async (_, _) => {
+            if(_started)return; _started=true;
+            await RunAsync(async()=>{await DiscoverAsync(); if(_sessions.Items.Count==1) await ConnectAsync();});
+        };
     }
 
     private Button Button(string label, Func<Task> action) {
@@ -298,7 +304,7 @@ internal sealed class StudioWindow : Window {
         string glyph=plain switch {
             "Discover" or "Load operator catalog" => "\uE721",
             "Connect" => "\uE8A7",
-            "Refresh nodes" or "Cook" or "Read attributes" or "Read geometry / parameters" => "\uE72C",
+            "Refresh" or "Sync edits" or "Refresh nodes" or "Cook" or "Read attributes" or "Read geometry / parameters" => "\uE72C",
             "Add operator" => "\uE710",
             "Install selected HDA" or "Install HDA file" or "Import BGEO" => "\uE8B5",
             "Export BGEO" => "\uE74E",
@@ -321,11 +327,12 @@ internal sealed class StudioWindow : Window {
         return b;
     }
     private async Task RunAsync(Func<Task> action) {
-        if (_busy) return;
+        try { await _operationGate.WaitAsync(_lifetime.Token); }
+        catch(OperationCanceledException) { return; }
         _busy = true;
         try { await action(); }
         catch (Exception e) { _status.Text = e.Message; }
-        finally { _busy = false; }
+        finally { _busy = false; _operationGate.Release(); }
     }
     private Task<JsonElement> Request(object request) =>
         (_bridge ?? throw new InvalidOperationException("Connect to Houdini first.")).RequestAsync(request, _lifetime.Token);
@@ -359,25 +366,41 @@ internal sealed class StudioWindow : Window {
         _previewPath = null; _pending.Clear(); _nodeId=-1; _scene=null;
         _status.Text = $"Connected: Houdini {result.GetProperty("version").GetString()} | {result.GetProperty("scene").GetString()}";
         await RefreshAsync();
+        await ReadProjectAsync();
     }
     private async Task RefreshAsync() {
-        string? selected = Selected;
+        string? selected = _nodes.SelectedNode?.Content is SceneEntry entry?entry.Path:null;
         var result = await Request(new { action = "nodes" });
         _allNodes = result.EnumerateArray().Select(x => x.GetString()!).ToArray();
         FilterNodes();
         SelectPath(selected);
     }
     private void FilterNodes() {
-        string? selected = Selected;
-        _nodes.ItemsSource = _allNodes.Where(x => x.Contains(_filter.Text, StringComparison.OrdinalIgnoreCase)).ToArray();
-        _nodes.SelectedItem = selected;
+        string? selected = _nodes.SelectedNode?.Content is SceneEntry entry?entry.Path:null;
+        var expanded=_treeNodes.Where(x=>x.Value.IsExpanded).Select(x=>x.Key).ToHashSet(StringComparer.Ordinal);
+        _nodes.RootNodes.Clear(); _treeNodes.Clear();
+        var leaves=_allNodes.ToHashSet(StringComparer.Ordinal);
+        foreach(string path in _allNodes.Where(x=>x.Contains(_filter.Text,StringComparison.OrdinalIgnoreCase))) {
+            TreeViewNode? parent=null;
+            string prefix="";
+            foreach(string part in path.Split('/',StringSplitOptions.RemoveEmptyEntries)) {
+                prefix+="/"+part;
+                if(!_treeNodes.TryGetValue(prefix,out var node)) {
+                    node=new TreeViewNode { Content=new SceneEntry(prefix,leaves.Contains(prefix)), IsExpanded=prefix=="/obj"||expanded.Contains(prefix) };
+                    _treeNodes.Add(prefix,node);
+                    if(parent==null) _nodes.RootNodes.Add(node); else parent.Children.Add(node);
+                }
+                parent=node;
+            }
+        }
+        SelectPath(selected);
     }
     private async Task CheckRevisionAsync() {
         string path = Selected!;
-        if (_parameters.XamlRoot is not null && Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(_parameters.XamlRoot) is DependencyObject focused) {
+        if (_previewPath==path && _parameters.XamlRoot is not null && Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(_parameters.XamlRoot) is DependencyObject focused) {
             for (DependencyObject? parent=focused;parent!=null;parent=VisualTreeHelper.GetParent(parent)) if (ReferenceEquals(parent,_parameters)) return;
         }
-        if(_pending.Keys.Any(k=>k.Path==path)) return;
+        if(_pending.Keys.Any(k=>k.Path==path) && _previewPath==path) return;
         var result = await Request(new { action = "revision", path });
         if (Selected == path && (_previewPath != path || _revision != result.GetProperty("cook").GetInt32() || _nodeId!=result.GetProperty("id").GetInt64() || _scene!=result.GetProperty("scene").GetString()))
             await InspectAsync();
@@ -437,7 +460,7 @@ internal sealed class StudioWindow : Window {
         int unsupported = data.TryGetProperty("unsupported", out var skipped) ? skipped.GetInt32() : 0;
         _status.Text = $"{path} | {sourcePoints:N0} source points | {data.GetProperty("primitives").GetInt32():N0} primitives | {_edges.Length:N0} preview edges | Cook {_revision}" +
             (unsupported > 0 ? $" | {unsupported} unsupported primitives" : "");
-        if(!rebuildParameters || _pending.Keys.Any(k=>k.Path==path)) return;
+        if(!rebuildParameters) return;
         var parms = await Request(new { action = "tuples", path });
         if (Selected != path) return;
         _parameters.Children.Clear();
@@ -507,13 +530,16 @@ internal sealed class StudioWindow : Window {
                 group.Children.Add(new Button { Content="Color picker", Flyout=new Flyout { Content=picker } });
             }
         }
+        long nodeId=_nodeId; string? scene=_scene;
         object Payload() {
             var data=readers.Select(x=>x()).ToArray();
-            return kind=="ramp" ? new { action="set_tuple", path, name, values=data, keys=keyReaders.Select(x=>x()).ToArray(), basis } : (object)new { action="set_tuple", path, name, values=data };
+            return kind=="ramp" ? new { action="set_tuple", path, name, nodeId, scene, values=data, keys=keyReaders.Select(x=>x()).ToArray(), basis } : (object)new { action="set_tuple", path, name, nodeId, scene, values=data };
         }
+        string? baseline=null;
+        try { baseline=JsonSerializer.Serialize(Payload()); } catch(Exception) { }
         void MarkDirty() {
             if(Selected!=path) return;
-            try { _pending[(path,name)]=Payload(); _lastEdit=DateTime.UtcNow; }
+            try { var payload=Payload(); if(JsonSerializer.Serialize(payload)==baseline && !_pending.ContainsKey((path,name))) return; _pending[(path,name)]=payload; _lastEdit=DateTime.UtcNow; }
             catch(Exception ex) { _status.Text=ex.Message; }
         }
         var apply=Button("Apply",async ()=>{
