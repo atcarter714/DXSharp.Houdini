@@ -15,7 +15,7 @@ internal sealed class PreviewRasterizer {
     private const int EdgeColor = unchecked((int)0xff69b6d5);
 
     public WriteableBitmap Render(int width, int height, Vector3[] points, (int A,int B)[] edges,
-        int[] triangles, Matrix4x4 rotation, double zoom, double panX, double panY, int mode) {
+        int[] triangles, Vector3[] colors, Matrix4x4 rotation, double zoom, double panX, double panY, int mode) {
         width = Math.Clamp(width, 1, 1280);
         height = Math.Clamp(height, 1, 900);
         if (_bitmap is null || width != _width || height != _height) {
@@ -43,8 +43,12 @@ internal sealed class PreviewRasterizer {
                     if (normal.LengthSquared()<1e-12f) continue;
                     normal=Vector3.Normalize(normal);
                     float shade=.28f+.72f*Math.Abs(Vector3.Dot(normal,Vector3.Normalize(new Vector3(-.35f,-.45f,1))));
-                    int color=unchecked((int)0xff000000)|((int)(132*shade)<<16)|((int)(183*shade)<<8)|(int)(202*shade);
-                    Triangle(a,b,c,color);
+                    Vector3 fallback=new(.52f,.72f,.79f);
+                    bool hasColor=colors.Length==points.Length;
+                    var ca=hasColor?colors[triangles[i]]:fallback;
+                    var cb=hasColor?colors[triangles[i+1]]:fallback;
+                    var cc=hasColor?colors[triangles[i+2]]:fallback;
+                    Triangle(a,b,c,ca,cb,cc,shade);
                 }
             }
             if (mode != 1 || triangles.Length==0)
@@ -72,7 +76,7 @@ internal sealed class PreviewRasterizer {
     private static float Cross(Vector3 a,Vector3 b,float x,float y) =>
         (b.X-a.X)*(y-a.Y)-(b.Y-a.Y)*(x-a.X);
 
-    private void Triangle(Vector3 a,Vector3 b,Vector3 c,int color) {
+    private void Triangle(Vector3 a,Vector3 b,Vector3 c,Vector3 ca,Vector3 cb,Vector3 cc,float shade) {
         float area=Cross(a,b,c.X,c.Y);
         if(Math.Abs(area)<1e-6f) return;
         int left=Math.Max(0,(int)MathF.Floor(Math.Min(a.X,Math.Min(b.X,c.X))));
@@ -84,7 +88,11 @@ internal sealed class PreviewRasterizer {
             if(u<0 || v<0 || w<0) continue;
             float z=u*a.Z+v*b.Z+w*c.Z;
             int index=y*_width+x;
-            if(z>_depth[index]) { _depth[index]=z; _pixels[index]=color; }
+            if(z>_depth[index]) {
+                _depth[index]=z;
+                var rgb=Vector3.Clamp((ca*u+cb*v+cc*w)*shade,Vector3.Zero,Vector3.One);
+                _pixels[index]=unchecked((int)0xff000000)|((int)(rgb.X*255)<<16)|((int)(rgb.Y*255)<<8)|(int)(rgb.Z*255);
+            }
         }
     }
     private void Line(Vector3 a,Vector3 b,bool depthTest) {
