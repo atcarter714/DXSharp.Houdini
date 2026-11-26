@@ -73,6 +73,19 @@ class StudioBridge:
                     "selected": [n.path() for n in hou.selectedNodes()],
                     "environment": {name: hou.getenv(name, "") for name in names},
                     "bridge": str(self.directory)}
+        if action == "scene_graph":
+            root = hou.node("/obj")
+            result = []
+            for n in (root,) + root.allSubChildren(recurse_in_locked_nodes=False):
+                if not isinstance(n, hou.OpNode):
+                    continue
+                category = n.type().category()
+                child_category = n.childTypeCategory()
+                result.append({"path": n.path(), "isSop": isinstance(n, hou.SopNode),
+                    "category": category.name(), "type": n.type().name(),
+                    "childCategory": child_category.name() if child_category else "",
+                    "inputs": [i.path() for i in n.inputs() if i is not None]})
+            return result
         if action == "nodes":
             return sorted(n.path() for n in hou.node("/obj").allSubChildren()
                           if isinstance(n, hou.SopNode))
