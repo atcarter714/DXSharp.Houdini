@@ -4,13 +4,13 @@
     <memberTool name="dxsharp_studio_start"/>
     <memberTool name="dxsharp_studio_stop"/>
   </toolshelf>
-  <tool name="dxsharp_studio_start" label="Start Studio Bridge" icon="BUTTONS_play">
+  <tool name="dxsharp_studio_start" label="Connect" icon="dxsharp_studio.png">
     <script scriptType="python"><![CDATA[
 import dxsharp_studio
 dxsharp_studio.start()
 ]]></script>
   </tool>
-  <tool name="dxsharp_studio_stop" label="Stop Studio Bridge" icon="BUTTONS_stop">
+  <tool name="dxsharp_studio_stop" label="Disconnect" icon="BUTTONS_stop">
     <script scriptType="python"><![CDATA[
 import dxsharp_studio
 dxsharp_studio.stop()
