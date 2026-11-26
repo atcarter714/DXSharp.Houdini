@@ -441,9 +441,9 @@ internal sealed class StudioWindow : Window {
         var result = await Request(new { action = "scene_graph" });
         _sceneEntries.Clear();
         foreach(var n in result.EnumerateArray()) {
-            var entry=new SceneEntry(n.GetProperty("path").GetString()!,n.GetProperty("isSop").GetBoolean(),n.GetProperty("category").GetString()!,
+            var sceneEntry=new SceneEntry(n.GetProperty("path").GetString()!,n.GetProperty("isSop").GetBoolean(),n.GetProperty("category").GetString()!,
                 n.GetProperty("type").GetString()!,n.GetProperty("childCategory").GetString()!,n.GetProperty("inputs").EnumerateArray().Select(i=>i.GetString()!).ToArray());
-            _sceneEntries[entry.Path]=entry;
+            _sceneEntries[sceneEntry.Path]=sceneEntry;
         }
         _allNodes = _sceneEntries.Keys.Order(StringComparer.Ordinal).ToArray();
         FilterNodes();
