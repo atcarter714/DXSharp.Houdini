@@ -18,7 +18,7 @@ internal sealed class BridgeClient( string directory ) {
                 if (!Directory.Exists(_directory)) throw new IOException("Houdini bridge disconnected.");
                 await Task.Delay( 40, timeout.Token );
             }
-            using var doc = JsonDocument.Parse( await File.ReadAllTextAsync( output, timeout.Token ) );
+            using var doc = await ReadResponseAsync( output, timeout.Token );
             var root = doc.RootElement;
             if ( !root.GetProperty( "ok" ).GetBoolean() )
                 throw new InvalidOperationException( root.GetProperty( "error" ).GetString() );
@@ -30,4 +30,26 @@ internal sealed class BridgeClient( string directory ) {
             }
         }
     }
+
+    // The bridge publishes completed responses with an atomic rename. On
+    // Windows, a scanner/indexer or other process may briefly deny access
+    // after publication. Retry only opening/reading the same response,
+    // never submitting a second request (which could duplicate an edit).
+    private static async Task<JsonDocument> ReadResponseAsync( string path, CancellationToken token ) {
+        for ( int attempt = 0; ; ++attempt ) {
+            token.ThrowIfCancellationRequested();
+            try {
+                await using var stream = new FileStream( path, FileMode.Open, FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete, 64 * 1024,
+                    FileOptions.Asynchronous | FileOptions.SequentialScan );
+                return await JsonDocument.ParseAsync( stream, cancellationToken: token );
+            }
+            catch ( IOException ex ) when ( attempt < 8 && IsSharingViolation( ex ) ) {
+                await Task.Delay( Math.Min( 250, 20 << attempt ), token );
+            }
+        }
+    }
+
+    private static bool IsSharingViolation( IOException ex ) =>
+        OperatingSystem.IsWindows() && (ex.HResult & 0xffff) is 32 or 33;
 }
