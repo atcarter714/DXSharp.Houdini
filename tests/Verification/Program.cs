@@ -24,3 +24,10 @@ Throws<ArgumentException>( () => new MeshTopology( points, [0, 1, 2], [4] ) );
 Throws<ArgumentOutOfRangeException>( () => new MeshTopology( points, [0, 1, 4], [3] ) );
 Throws<InvalidOperationException>( () => new MeshTopology( points, [0, 1, 2, 3], [4] ).GetTriangleIndices() );
 Console.WriteLine( "PASS: version and mesh topology verification." );
+
+Check( CanonicalAttributes.TryResolve("uv",3,out var uv) && uv.Components==2 && uv.Semantic=="TEXCOORD", "UV layout" );
+Check( CanonicalAttributes.ConvertFloatStream("Cd",3,[.2f,.4f,.6f]).SequenceEqual(new[]{.2f,.4f,.6f,1f}), "Color alpha expansion" );
+Check( CanonicalAttributes.ConvertFloatStream("uv",3,[.2f,.4f,0f]).SequenceEqual(new[]{.2f,.4f}), "UV dimensional conversion" );
+Check( CanonicalAttributes.ElementIndex(AttributeDomain.Vertex,5,17,3)==17, "Corner domain" );
+Throws<ArgumentException>( ()=>CanonicalAttributes.ConvertFloatStream("P",3,[1f,2f]) );
+Console.WriteLine("PASS: canonical attribute contracts.");
