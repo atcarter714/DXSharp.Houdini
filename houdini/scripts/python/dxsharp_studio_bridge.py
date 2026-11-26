@@ -24,7 +24,7 @@ def _compile_sop(node):
         if not isinstance(prim, hou.Polygon) or not prim.isClosed() or len(prim.vertices()) != 3:
             raise ValueError("Compile requires closed polygon triangles; append a Divide/Triangulate SOP.")
         corners.extend(indices[v.point().number()] for v in prim.vertices())
-        materials.append(prim.stringAttribValue(material) if material else default_mat)
+        materials.append((prim.stringAttribValue(material) or default_mat) if material else default_mat)
     attrs = []
     for domain, find, values in (
         ("Point",geo.findPointAttrib,geo.pointFloatAttribValues),
@@ -65,9 +65,9 @@ def _usd_value(value):
         return str(value)
 
 def _usd_material(material,time):
-    from pxr import UsdShade
+    from pxr import Usd, UsdShade
     graph = []
-    for prim in material.GetPrim().GetDescendants():
+    for prim in Usd.PrimRange(material.GetPrim()):
         shader = UsdShade.Shader(prim)
         if not shader:
             continue

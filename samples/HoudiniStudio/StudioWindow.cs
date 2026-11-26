@@ -65,6 +65,7 @@ internal sealed partial class StudioWindow : Window {
         gpu.Pan=new((float)(2*_panX/_viewport.ActualWidth),(float)(-2*_panY/_viewport.ActualHeight));
         gpu.Exposure=(float)_exposure.Value;gpu.Roughness=(float)_roughness.Value;gpu.Metallic=(float)_metallic.Value;
         gpu.DebugMode=Math.Max(0,_gpuMode.SelectedIndex);
+        gpu.Texture=_texturePreview;gpu.Tint=_materialTint;gpu.Emission=_materialEmission;gpu.FlipV=_flipV.IsChecked==true;
         _nativeView.Width=_viewport.ActualWidth;_nativeView.Height=_viewport.ActualHeight;
         _nativeView.Visibility=Visibility.Visible;_nativeView.IsSuspended=!_sceneVisible;
         _preview.Visibility=Visibility.Collapsed;
