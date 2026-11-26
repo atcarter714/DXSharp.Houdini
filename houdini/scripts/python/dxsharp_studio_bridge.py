@@ -7,17 +7,21 @@ class StudioBridge:
         self.callback = self.poll
         self.running = False
         self.busy = False
+        self.manifest = self.directory / "session.json"
 
     def start(self):
         if not self.running:
             hou.ui.addEventLoopCallback(self.callback)
             self.running = True
+        self.manifest.write_text(json.dumps({"protocol": 1, "pid": os.getpid(),
+            "version": hou.applicationVersionString(), "scene": hou.hipFile.path()}), encoding="utf-8")
         print("DXSharp Studio bridge:", self.directory)
 
     def stop(self):
         if self.running:
             hou.ui.removeEventLoopCallback(self.callback)
             self.running = False
+        self.manifest.unlink(missing_ok=True)
 
     def poll(self):
         if self.busy:
