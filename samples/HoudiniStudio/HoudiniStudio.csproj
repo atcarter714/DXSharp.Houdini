@@ -12,6 +12,9 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.7.0" />
+    <PackageReference Include="DXSharp.Framework.WinUI" Version="[0.4.0-preview.4]" />
+    <ProjectReference Include="../../src/DXSharp.Houdini.Geometry/DXSharp.Houdini.Geometry.csproj" />
+    <None Update="Shaders/Preview.hlsl" CopyToOutputDirectory="PreserveNewest" />
     <ProjectReference Include="../../src/DXSharp.Houdini.Engine/DXSharp.Houdini.Engine.csproj" />
   </ItemGroup>
 </Project>

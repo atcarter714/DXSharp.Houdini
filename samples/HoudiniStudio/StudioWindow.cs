@@ -6,6 +6,9 @@ using Microsoft.UI;
 using System.Numerics;
 using System.Globalization;
 using System.Text.Json;
+using DXSharp.Graphics;
+using DXSharp.Framework.WinUI;
+using DXSharp.Houdini.Geometry;
 
 namespace DXSharp.Houdini.Studio;
 
@@ -15,6 +18,66 @@ internal sealed class StudioWindow : Window {
     }
     private readonly ComboBox _sessions = new() { PlaceholderText = "Discover Houdini sessions", MinWidth = 220 };
     private readonly PreviewRasterizer _raster = new();
+    private readonly D3D12Viewport _nativeView=new() { IsHitTestVisible=false, Visibility=Visibility.Collapsed };
+    private readonly ComboBox _backend=new() { ItemsSource=new[]{"Direct3D 12","CPU reference"},SelectedIndex=0 };
+    private readonly ComboBox _gpuMode=new() { ItemsSource=new[]{"PBR preview","Vertex color","Normals","UV checker"},SelectedIndex=0 };
+    private readonly Slider _exposure=new() { Minimum=-4,Maximum=4,StepFrequency=.1,Value=0 };
+    private readonly Slider _roughness=new() { Minimum=.045,Maximum=1,StepFrequency=.01,Value=.5 };
+    private readonly Slider _metallic=new() { Minimum=0,Maximum=1,StepFrequency=.01,Value=0 };
+    private GraphicsDevice? _gpuDevice;
+    private GpuPreview? _gpu;
+    private CompiledMesh? _compiledPreview;
+    private Vector3[]? _compiledPoints;
+    private Vector3[] _normals=[];
+    private Vector2[] _uvs=[];
+    private bool _gpuFailed,_closing,_closeAllowed,_sceneVisible=true;
+    private bool StartGpu() {
+        if(_gpuFailed||_closing)return false;
+        if(_gpu!=null)return true;
+        try {
+            _gpuDevice=GraphicsDevice.Create(new(){UseWarp=Environment.GetCommandLineArgs().Contains("--warp")});
+            _gpu=new GpuPreview(_gpuDevice);
+            _nativeView.RenderFailed+=error=>{
+                _gpuFailed=true;_backend.SelectedIndex=1;_status.Text="D3D12 fallback: "+error.Message;Draw();
+            };
+            _nativeView.Start(_gpuDevice,new(){EnableDepth=true,FramesInFlight=2,ClearColor=new(.063f,.11f,.16f,1)},_gpu.Draw,this);
+            return true;
+        } catch(Exception error) {
+            _gpuFailed=true;_backend.SelectedIndex=1;_status.Text="D3D12 fallback: "+error.Message;
+            return false;
+        }
+    }
+    private bool DrawGpu(Matrix4x4 rotation) {
+        // The CPU reference retains original polygon edges and Houdini's camera
+        // projection until the native wire/clip-space implementation is qualified.
+        if(_backend.SelectedIndex!=0||_shading.SelectedIndex!=1||_syncedView.HasValue||_triangles.Length==0||!StartGpu())return false;
+        var gpu=_gpu!;
+        if(!ReferenceEquals(_compiledPoints,_points)) {
+            var attrs=new List<FloatAttribute>();
+            if(_colors.Length==_points.Length)attrs.Add(new("Cd",AttributeDomain.Point,3,_colors.SelectMany(v=>new[]{v.X,v.Y,v.Z}).ToArray()));
+            else attrs.Add(new("Cd",AttributeDomain.Detail,3,[.35f,.58f,.68f]));
+            if(_normals.Length==_points.Length)attrs.Add(new("N",AttributeDomain.Point,3,_normals.SelectMany(v=>new[]{v.X,v.Y,v.Z}).ToArray()));
+            if(_uvs.Length==_points.Length)attrs.Add(new("uv",AttributeDomain.Point,2,_uvs.SelectMany(v=>new[]{v.X,v.Y}).ToArray()));
+            _compiledPreview=GeometryProcessor.Compile(new(_points,_triangles,Enumerable.Repeat(3,_triangles.Length/3).ToArray()),attrs);
+            _compiledPoints=_points;
+        }
+        gpu.Source=_compiledPreview;gpu.Rotation=rotation;gpu.Zoom=(float)_zoom.Value;
+        gpu.Pan=new((float)(2*_panX/_viewport.ActualWidth),(float)(-2*_panY/_viewport.ActualHeight));
+        gpu.Exposure=(float)_exposure.Value;gpu.Roughness=(float)_roughness.Value;gpu.Metallic=(float)_metallic.Value;
+        gpu.DebugMode=Math.Max(0,_gpuMode.SelectedIndex);
+        _nativeView.Width=_viewport.ActualWidth;_nativeView.Height=_viewport.ActualHeight;
+        _nativeView.Visibility=Visibility.Visible;_nativeView.IsSuspended=!_sceneVisible;
+        _preview.Visibility=Visibility.Collapsed;
+        _renderTime.Text=(_gpuDevice?.AdapterName??"GPU")+" · D3D12";
+        return true;
+    }
+    private async void CloseGpuOrderly() {
+        if(_closing)return;_closing=true;_timer.Stop();_lifetime.Cancel();
+        try {
+            await _nativeView.StopAsync();_nativeView.Dispose();_gpu?.Dispose();_gpuDevice?.Dispose();
+        } catch(Exception error) {System.Diagnostics.Debug.WriteLine(error);}
+        finally {_closeAllowed=true;Close();}
+    }
     private readonly Image _preview = new() { Stretch = Stretch.Fill, IsHitTestVisible = false };
     private readonly RadioButtons _shading = new() { MaxColumns=3 };
     private readonly CheckBox _legacy = new() { Content="Include hidden / deprecated" };
@@ -50,7 +113,7 @@ internal sealed class StudioWindow : Window {
     private readonly TextBlock _renderTime = new() { FontSize = 12, Foreground = Brush(141,177,193), VerticalAlignment = VerticalAlignment.Center };
     private readonly ComboBox _quality = new() { ItemsSource = new[] { "Fast", "Balanced", "Detailed" }, SelectedIndex = 1 };
     private static string SettingsFile => System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DXSharp", "HoudiniStudio", "settings.json");
-    private sealed record Preferences(int Shading, int Quality, bool Live, double InspectorWidth=420, bool AutoApply=false, bool FollowView=false);
+    private sealed record Preferences(int Shading, int Quality, bool Live, double InspectorWidth=420, bool AutoApply=false, bool FollowView=false, int Backend=0, int GpuMode=0, double Exposure=0, double Roughness=.5, double Metallic=0);
     private void LoadPreferences() {
         try {
             if (!File.Exists(SettingsFile)) return;
@@ -58,6 +121,8 @@ internal sealed class StudioWindow : Window {
             if (p==null) return;
             _shading.SelectedIndex=Math.Clamp(p.Shading,0,2);
             _quality.SelectedIndex=Math.Clamp(p.Quality,0,2);
+            _backend.SelectedIndex=Math.Clamp(p.Backend,0,1);_gpuMode.SelectedIndex=Math.Clamp(p.GpuMode,0,3);
+            _exposure.Value=Math.Clamp(p.Exposure,-4,4);_roughness.Value=Math.Clamp(p.Roughness,.045,1);_metallic.Value=Math.Clamp(p.Metallic,0,1);
             _live.IsOn=p.Live;
             _autoApply.IsChecked=p.AutoApply; _followView.IsChecked=p.FollowView;
             _inspectorWidth=Math.Clamp(p.InspectorWidth,300,720); _inspectorColumn.Width=new GridLength(_inspectorWidth);
@@ -66,7 +131,7 @@ internal sealed class StudioWindow : Window {
     private void SavePreferences() {
         try {
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(SettingsFile)!);
-            File.WriteAllText(SettingsFile,JsonSerializer.Serialize(new Preferences(_shading.SelectedIndex,_quality.SelectedIndex,_live.IsOn,_inspectorWidth,_autoApply.IsChecked==true,_followView.IsChecked==true)));
+            File.WriteAllText(SettingsFile,JsonSerializer.Serialize(new Preferences(_shading.SelectedIndex,_quality.SelectedIndex,_live.IsOn,_inspectorWidth,_autoApply.IsChecked==true,_followView.IsChecked==true,_backend.SelectedIndex,_gpuMode.SelectedIndex,_exposure.Value,_roughness.Value,_metallic.Value)));
         } catch (IOException) { } catch (UnauthorizedAccessException) { }
     }
     private sealed record OperatorEntry(string Name, string Label, int Inputs, bool Hidden, bool Deprecated) {
@@ -140,6 +205,13 @@ internal sealed class StudioWindow : Window {
         settingsPanel.Children.Add(_directory);
         settingsPanel.Children.Add(new TextBlock { Text="Preview quality" });
         settingsPanel.Children.Add(_quality);
+        settingsPanel.Children.Add(new TextBlock {Text="Rendering backend"});settingsPanel.Children.Add(_backend);
+        settingsPanel.Children.Add(new TextBlock {Text="GPU debug shading (Shaded mode)"});settingsPanel.Children.Add(_gpuMode);
+        foreach(var entry in new[]{("Exposure (EV)",_exposure),("Roughness",_roughness),("Metallic",_metallic)}) {
+            settingsPanel.Children.Add(new TextBlock{Text=entry.Item1});settingsPanel.Children.Add(entry.Item2);
+            entry.Item2.ValueChanged+=(_,_)=>Draw();
+        }
+        _backend.SelectionChanged+=(_,_)=>Draw();_gpuMode.SelectionChanged+=(_,_)=>Draw();
         _quality.SelectionChanged+=(_,_)=>Draw();
         var settingsButton=new Button { Content = "⚙ Settings", Background=Brush(38,64,80) };
         header.Children.Add(settingsButton);
@@ -187,6 +259,7 @@ internal sealed class StudioWindow : Window {
         center.RowDefinitions.Add(new() { Height = new GridLength(1, GridUnitType.Star) });
         center.RowDefinitions.Add(new() { Height = GridLength.Auto });
         _viewport.Children.Add(_preview);
+        _viewport.Children.Add(_nativeView);
         _viewport.HorizontalAlignment=HorizontalAlignment.Stretch;
         _viewport.VerticalAlignment=VerticalAlignment.Stretch;
         Grid.SetRow(_viewport,1); center.Children.Add(_viewport);
@@ -299,6 +372,7 @@ internal sealed class StudioWindow : Window {
             pageHost.Children.Add(page);
         }
         void SelectWorkspace() {
+            _sceneVisible=workspace.SelectedIndex==0;_nativeView.IsSuspended=!_sceneVisible||_nativeView.Visibility!=Visibility.Visible;
             for(int i=0;i<pages.Length;i++)
                 pages[i].Visibility=i==workspace.SelectedIndex?Visibility.Visible:Visibility.Collapsed;
         }
@@ -359,6 +433,7 @@ internal sealed class StudioWindow : Window {
         };
         _followView.Checked+=async (_,_)=>{if(_bridge!=null) await RunAsync(MatchViewAsync);};
         _timer.Start();
+        AppWindow.Closing+=(_,args)=>{if(!_closeAllowed){args.Cancel=true;CloseGpuOrderly();}};
         Closed += (_, _) => { SavePreferences(); _timer.Stop(); _lifetime.Cancel(); };
         LoadPreferences();
         root.Loaded += async (_, _) => {
@@ -526,6 +601,8 @@ internal sealed class StudioWindow : Window {
         _points = data.GetProperty("positions").EnumerateArray().Select(p =>
             new Vector3(p[0].GetSingle(), p[1].GetSingle(), p[2].GetSingle())).ToArray();
         _colors=data.TryGetProperty("colors",out var colors)?colors.EnumerateArray().Select(p=>new Vector3(p[0].GetSingle(),p[1].GetSingle(),p[2].GetSingle())).ToArray():[];
+        _normals=data.TryGetProperty("normals",out var ns)?ns.EnumerateArray().Select(v=>new Vector3(v[0].GetSingle(),v[1].GetSingle(),v[2].GetSingle())).ToArray():[];
+        _uvs=data.TryGetProperty("uv",out var uv)?uv.EnumerateArray().Select(v=>new Vector2(v[0].GetSingle(),v[1].GetSingle())).ToArray():[];
         _triangles = data.TryGetProperty("triangles", out var triangles) ? triangles.EnumerateArray().Select(x => x.GetInt32()).ToArray() : [];
         _edges = data.GetProperty("edges").EnumerateArray().Select(e => (e[0].GetInt32(), e[1].GetInt32())).ToArray();
         Draw();
@@ -723,6 +800,9 @@ internal sealed class StudioWindow : Window {
             double factor=Math.Min(1,Math.Min(limit/_viewport.ActualWidth,limit*.75/_viewport.ActualHeight));
             var watch=System.Diagnostics.Stopwatch.StartNew();
             var rotation=_syncedRotation??(Matrix4x4.CreateRotationY((float)(_yaw.Value*Math.PI/180))*Matrix4x4.CreateRotationX((float)(_pitch.Value*Math.PI/180)));
+            if(_closing)return;
+            try {if(DrawGpu(rotation))return;} catch(Exception error){_gpuFailed=true;_backend.SelectedIndex=1;_status.Text="Preview fallback: "+error.Message;}
+            _nativeView.IsSuspended=true;_nativeView.Visibility=Visibility.Collapsed;_preview.Visibility=Visibility.Visible;
             _preview.Width=_viewport.ActualWidth; _preview.Height=_viewport.ActualHeight;
             _preview.Source=_raster.Render((int)(_viewport.ActualWidth*factor),(int)(_viewport.ActualHeight*factor),_points,_edges,_triangles,_colors,rotation,_zoom.Value,_panX*factor,_panY*factor,Math.Max(0,_shading.SelectedIndex),_syncedView);
             _renderTime.Text=$"{watch.Elapsed.TotalMilliseconds:F0} ms · CPU";
