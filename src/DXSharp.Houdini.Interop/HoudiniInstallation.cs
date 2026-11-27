@@ -14,9 +14,14 @@ public sealed record HoudiniInstallation( string Root ) {
     public Version InstalledVersion {
         get {
             if ( File.Exists( ClientLibrary ) ) {
-                var info = FileVersionInfo.GetVersionInfo( ClientLibrary );
-                if ( info.FileMajorPart > 0 )
-                    return new( info.FileMajorPart, info.FileMinorPart, info.FileBuildPart, info.FilePrivatePart );
+                try {
+                    var info = FileVersionInfo.GetVersionInfo( ClientLibrary );
+                    if ( info.FileMajorPart > 0 )
+                        return new( info.FileMajorPart, info.FileMinorPart, info.FileBuildPart, info.FilePrivatePart );
+                }
+                catch ( IOException ) { }
+                catch ( UnauthorizedAccessException ) { }
+                catch ( System.ComponentModel.Win32Exception ) { }
             }
             var match = Regex.Match( Path.GetFileName( Path.TrimEndingDirectorySeparator( Root ) ), @"(?<!\d)(\d+\.\d+\.\d+(?:\.\d+)?)(?!\d)" );
             return match.Success && Version.TryParse( match.Value, out var version ) ? version : new( 0, 0, 0, 0 );
@@ -91,7 +96,7 @@ public sealed record HoudiniInstallation( string Root ) {
                     if ( uninstall == null ) continue;
                     foreach ( string name in uninstall.GetSubKeyNames() ) {
                         using var entry = uninstall.OpenSubKey( name );
-                        if ( entry?.GetValue( "DisplayName" ) is string title &&
+                        if ( entry != null && entry.GetValue( "DisplayName" ) is string title &&
                             ( title == "Houdini" || title.StartsWith( "Houdini ", StringComparison.OrdinalIgnoreCase ) ) &&
                             entry.GetValue( "InstallLocation" ) is string { Length: > 0 } location )
                             result.Add( location );

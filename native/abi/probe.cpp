@@ -4,7 +4,8 @@
 #include <iostream>
 #include <type_traits>
 
-// Report the installed HDK ABI rather than requiring the original baseline.\n// This probe does not qualify other versions automatically.
+// Report the installed HDK ABI rather than requiring the original baseline.
+// This probe does not qualify other versions automatically.
 static_assert(sizeof(HAPI_Bool) == 1);
 static_assert(sizeof(HAPI_SessionId) == 8);
 

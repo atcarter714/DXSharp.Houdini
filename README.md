@@ -71,7 +71,7 @@ The preview currently uses a depth-buffered **CPU bitmap rasterizer**, not a nat
 | DXSharp.Core | 0.4.0-preview.4 |
 | .NET / platform | .NET 10 / Windows x64 |
 
-Use the exact matching local Houdini toolkit for native compilation. The managed build and deterministic verification can run without Houdini installed.
+Use the exact matching local Houdini toolkit for native compilation. 22.0.514 is the original compatibility baseline, not a required installation path. The discovery tools select a locally installed version; other builds require their own native qualification. The managed build and deterministic verification can run without Houdini installed.
 
 ```powershell
 git clone https://github.com/atcarter714/DXSharp.Houdini.git
@@ -106,14 +106,15 @@ Only enable the bridge for trusted local processes. It uses a local temporary di
 ### Native SDK diagnostics and HDK build
 
 ```powershell
-$HoudiniRoot = 'C:/Program Files/Side Effects Software/Houdini 22.0.514'
-
-dotnet run --project samples/Diagnostics -- --root $HoudiniRoot
-
-pwsh -File eng/build.ps1 -HoudiniRoot $HoudiniRoot -Native
+pwsh -File eng/find-houdini.ps1
+dotnet run --project samples/Diagnostics -- --list
+dotnet run --project samples/Diagnostics
+pwsh -File eng/build.ps1 -Native
 ```
 
 Native compilation requires the matching Houdini toolkit, CMake and supported MSVC toolset. Check `hcustom --output_compiler_range` in Houdini Command Line Tools.
+
+To select a specific build, pass `-HoudiniVersion 22.0.508` to the engineering scripts or `--version 22.0.508` to Diagnostics. An explicit `-HoudiniRoot` / `--root` overrides automatic discovery. See [installation selection](docs/qualification.md).
 
 The diagnostic program queries the native client version without creating a session or consuming a license. It does not validate HAPI cooking or license entitlement. The native build stages the ABI probe and pass-through SOP; it does not install the plugin into the user profile. See [native qualification](docs/qualification.md).
 

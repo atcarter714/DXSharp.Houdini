@@ -16,7 +16,7 @@ The package is separate from Arkaen-Houdini and does not require or modify it. T
 
 ## Manual fallback
 
-Open Houdini 22.0.514 with an existing scene or an empty scene. In Windows > Python Shell, execute (adjust path if necessary):
+Open a supported local Houdini installation with an existing scene or an empty scene. The original target was 22.0.514; installation selection is described in [qualification](qualification.md). In Windows > Python Shell, execute (adjust path if necessary):
 
 ```python
 exec(compile(open(r"C:\Users\atcar\source\arkaen\DXSharp.Houdini\houdini\scripts\python\dxsharp_studio_bridge.py", encoding="utf-8").read(), "dxsharp_studio_bridge.py", "exec"))
