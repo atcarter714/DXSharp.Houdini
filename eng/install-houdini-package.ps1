@@ -1,11 +1,21 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [string]$PreferenceDirectory = $env:HOUDINI_USER_PREF_DIR,
+    [string]$PreferenceDirectory,
+    [string]$HoudiniRoot,
+    [string]$HoudiniVersion,
     [switch]$Uninstall
 )
 $ErrorActionPreference = 'Stop'
+if (-not $PreferenceDirectory -and -not $HoudiniRoot -and -not $HoudiniVersion) {
+    $PreferenceDirectory=$env:HOUDINI_USER_PREF_DIR
+}
 if (-not $PreferenceDirectory) {
-    $PreferenceDirectory = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'houdini22.0'
+    . (Join-Path $PSScriptRoot 'HoudiniDiscovery.ps1')
+    $HoudiniRoot=Resolve-DXHoudiniRoot -Root $HoudiniRoot -Version $HoudiniVersion
+    $version=Get-DXHoudiniVersion $HoudiniRoot
+    if ($version.Major -eq 0) { throw 'Unable to determine Houdini preference version. Specify -PreferenceDirectory.' }
+    $PreferenceDirectory=Join-Path ([Environment]::GetFolderPath('MyDocuments')) "houdini$($version.Major).$($version.Minor)"
+    Write-Host "Houdini: $version ($HoudiniRoot)"
 }
 $directory = Join-Path $PreferenceDirectory 'packages'
 $target = Join-Path $directory 'DXSharp.Houdini.json'

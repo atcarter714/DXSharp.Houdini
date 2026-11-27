@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$HoudiniRoot = 'C:/Program Files/Side Effects Software/Houdini 22.0.514',
+    [string]$HoudiniRoot,
+    [string]$HoudiniVersion,
     [switch]$Aov,
     [switch]$Hardware,
     [switch]$Standalone,
@@ -15,15 +16,24 @@ if (($Standalone -or $Hardware) -and -not $Aov) {
 }
 if ($Python -and -not $Standalone) { throw '-Python is only used with -Standalone.' }
 $repo=Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'HoudiniDiscovery.ps1')
 
 function Import-MsvcEnvironment {
+    $existing=Get-Command link.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($existing -and $env:VCToolsInstallDir -and $env:WindowsSdkDir -and $env:LIB -and
+        $env:VSCMD_ARG_TGT_ARCH -eq 'x64' -and $existing.Source.StartsWith($env:VCToolsInstallDir,[StringComparison]::OrdinalIgnoreCase)) {
+        Write-Host "MSVC linker: $($existing.Source)"
+        return
+    }
     $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
     if (-not (Test-Path $vswhere)) {
         throw 'vswhere.exe not found. Install Visual Studio or Build Tools with Desktop development with C++ (default components, including Windows SDK).'
     }
-    $vs=@(& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+    $vs=@(& $vswhere -latest -prerelease -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
     if ($LASTEXITCODE -ne 0 -or -not $vs.Count) {
-        throw 'MSVC x64 tools not found. Modify your Visual Studio installation and install Desktop development with C++.'
+        Write-Host 'Visual Studio installations (including previews):'
+        & $vswhere -all -prerelease -products '*' -property installationPath | ForEach-Object { Write-Host $_ }
+        throw 'No Visual Studio instance reports the x64/x86 MSVC component. Install Desktop development with C++ (Visual Studio or Build Tools), then retry.'
     }
     $dev=Join-Path $vs[0] 'Common7/Tools/VsDevCmd.bat'
     if (-not (Test-Path $dev)) { throw "Missing developer environment: $dev" }
@@ -83,7 +93,8 @@ try {
         }
         Invoke-ProbePython $exe $argsList 'PASS: DXSharp NativeAOT D3D12'
     } else {
-        $HoudiniRoot=(Resolve-Path $HoudiniRoot).Path
+        $HoudiniRoot=Resolve-DXHoudiniRoot -Root $HoudiniRoot -Version $HoudiniVersion -RequirePython
+        Write-Host "Houdini: $(Get-DXHoudiniVersion $HoudiniRoot) ($HoudiniRoot)"
         $env:HFS=$HoudiniRoot
         $env:PATH=(Join-Path $HoudiniRoot 'bin')+';'+$env:PATH
         $marker=if ($Aov) { 'PASS: DXSharp NativeAOT D3D12' } else { 'PASS: Houdini USD discovery' }

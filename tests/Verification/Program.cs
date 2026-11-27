@@ -1,6 +1,7 @@
 using System.Numerics;
 using DXSharp.Houdini.Engine;
 using DXSharp.Houdini.Geometry;
+using DXSharp.Houdini.Interop;
 
 static void Check( bool condition, string message ) {
     if ( !condition ) throw new InvalidOperationException( message );
@@ -75,3 +76,20 @@ try {
     Throws<InvalidDataException>(()=>TexturePayload.ReadCop(raw));
 } finally {File.Delete(raw);File.Delete(raw+".json");}
 Console.WriteLine("PASS: strict geometry, attribute precedence and texture payload verification.");
+
+Check(HoudiniInstallation.MatchesVersion(new(22,0,508,0),new(22,0)), "Minor version selector");
+Check(HoudiniInstallation.MatchesVersion(new(22,0,508,0),new(22,0,508)), "Exact build selector");
+Check(!HoudiniInstallation.MatchesVersion(new(22,0,514,0),new(22,0,508)), "Different builds");
+string discoveryRoot=Path.Combine(Path.GetTempPath(),"dxsharp-discovery-"+Guid.NewGuid().ToString("N"));
+try {
+    string Make(string name) {
+        string root=Path.Combine(discoveryRoot,name);
+        Directory.CreateDirectory(Path.Combine(root,"bin"));
+        File.WriteAllBytes(Path.Combine(root,"bin","libHAPIL.dll"),[]);
+        return root;
+    }
+    string older=Make("Houdini 22.0.99"),newer=Make("Houdini 22.0.508");
+    var installations=HoudiniInstallation.DiscoverCandidates([older,newer,older,Path.Combine(discoveryRoot,"missing")]);
+    Check(installations.Count==2&&installations[0].Root==newer,"Numeric version sort and deduplication.");
+} finally {if(Directory.Exists(discoveryRoot))Directory.Delete(discoveryRoot,true);}
+Console.WriteLine("PASS: Houdini discovery and version selection.");
