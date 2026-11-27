@@ -17,16 +17,23 @@ public sealed record HoudiniInstallation( string Root ) {
                 try {
                     var info = FileVersionInfo.GetVersionInfo( ClientLibrary );
                     if ( info.FileMajorPart > 0 )
-                        return new( info.FileMajorPart, info.FileMinorPart, info.FileBuildPart, info.FilePrivatePart );
+                        return NormalizeFileVersion( new( info.FileMajorPart, info.FileMinorPart, info.FileBuildPart, info.FilePrivatePart ) );
                 }
                 catch ( IOException ) { }
                 catch ( UnauthorizedAccessException ) { }
                 catch ( System.ComponentModel.Win32Exception ) { }
             }
             var match = Regex.Match( Path.GetFileName( Path.TrimEndingDirectorySeparator( Root ) ), @"(?<!\d)(\d+\.\d+\.\d+(?:\.\d+)?)(?!\d)" );
-            return match.Success && Version.TryParse( match.Value, out var version ) ? version : new( 0, 0, 0, 0 );
+            return match.Success && Version.TryParse( match.Value, out var version ) ? NormalizeFileVersion( version ) : new( 0, 0, 0, 0 );
         }
     }
+
+    // Windows PE metadata can report 22.0.0.508 for Houdini 22.0.508.
+    // Preserve ordinary major.minor.build.patch versions unchanged.
+    public static Version NormalizeFileVersion( Version version ) =>
+        version.Build == 0 && version.Revision > 0
+            ? new( version.Major, version.Minor, version.Revision, 0 )
+            : version;
 
     public static HoudiniInstallation Resolve( string? root = null, Version? version = null ) {
         RequireWindowsX64();

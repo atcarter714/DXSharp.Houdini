@@ -44,17 +44,26 @@ function Get-DXHoudiniInstallations {
     $installations | Sort-Object -Property @{Expression='Version';Descending=$true},Root
 }
 
+# SideFX's Windows file version may store the application build in
+# FilePrivatePart (e.g. 22.0.0.508), not FileBuildPart.
+function ConvertTo-DXHoudiniApplicationVersion([version]$FileVersion) {
+    if ($FileVersion.Build -eq 0 -and $FileVersion.Revision -gt 0) {
+        return [version]::new($FileVersion.Major,$FileVersion.Minor,$FileVersion.Revision,0)
+    }
+    return $FileVersion
+}
+
 function Get-DXHoudiniVersion([string]$Root) {
     # Prefer the installed binary version, not a guessed marketing version.
     $client=Join-Path $Root 'bin/libHAPIL.dll'
     try {
         $info=[Diagnostics.FileVersionInfo]::GetVersionInfo($client)
         if ($info.FileMajorPart -gt 0) {
-            return [version]::new($info.FileMajorPart,$info.FileMinorPart,$info.FileBuildPart,$info.FilePrivatePart)
+            return (ConvertTo-DXHoudiniApplicationVersion ([version]::new($info.FileMajorPart,$info.FileMinorPart,$info.FileBuildPart,$info.FilePrivatePart)))
         }
     } catch {}
     if ((Split-Path -Leaf $Root) -match '(?<!\d)(\d+\.\d+\.\d+(?:\.\d+)?)(?!\d)') {
-        return [version]$Matches[1]
+        return (ConvertTo-DXHoudiniApplicationVersion ([version]$Matches[1]))
     }
     return [version]'0.0.0.0'
 }

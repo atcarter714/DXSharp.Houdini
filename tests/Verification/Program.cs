@@ -77,6 +77,9 @@ try {
 } finally {File.Delete(raw);File.Delete(raw+".json");}
 Console.WriteLine("PASS: strict geometry, attribute precedence and texture payload verification.");
 
+Check(HoudiniInstallation.NormalizeFileVersion(new(22,0,0,508))==new Version(22,0,508,0), "SideFX PE metadata normalization");
+Check(HoudiniInstallation.NormalizeFileVersion(new(22,0,514,2))==new Version(22,0,514,2), "Preserve canonical patch");
+Check(HoudiniInstallation.MatchesVersion(HoudiniInstallation.NormalizeFileVersion(new(22,0,0,508)),new(22,0,508)), "Normalized version selector");
 Check(HoudiniInstallation.MatchesVersion(new(22,0,508,0),new(22,0)), "Minor version selector");
 Check(HoudiniInstallation.MatchesVersion(new(22,0,508,0),new(22,0,508)), "Exact build selector");
 Check(!HoudiniInstallation.MatchesVersion(new(22,0,514,0),new(22,0,508)), "Different builds");

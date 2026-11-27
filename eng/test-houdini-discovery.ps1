@@ -16,6 +16,10 @@ try {
     if (-not (Test-DXHoudiniVersion $found[1].Version '22.0.508')) { throw 'Exact selector failed.' }
     if (Test-DXHoudiniVersion $found[0].Version '22.0.508') { throw 'Different version matched.' }
     if ((Resolve-DXHoudiniRoot -Root $found[1].Root) -ne $found[1].Root) { throw 'Explicit root failed.' }
+    $normalized=ConvertTo-DXHoudiniApplicationVersion ([version]'22.0.0.508')
+    if ($normalized -ne [version]'22.0.508.0' -or -not (Test-DXHoudiniVersion $normalized '22.0.508')) { throw 'SideFX PE version normalization failed.' }
+    if ((ConvertTo-DXHoudiniApplicationVersion ([version]'22.0.514.0')) -ne [version]'22.0.514.0') { throw 'Canonical version changed.' }
+    if ((ConvertTo-DXHoudiniApplicationVersion ([version]'22.0.514.2')) -ne [version]'22.0.514.2') { throw 'Nonzero patch lost.' }
     Write-Host 'PASS: Houdini discovery, numeric ordering and explicit root selection.'
 }
 finally { if(Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force } }
