@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "dependencies": {
+    "net10.0": {
+      "dxsharp.houdini.engine": {
+        "type": "Project",
+        "dependencies": {
+          "DXSharp.Houdini.Interop": "[0.1.0-preview.1, )"
+        }
+      },
+      "dxsharp.houdini.interop": {
+        "type": "Project"
+      }
+    }
+  }
+}

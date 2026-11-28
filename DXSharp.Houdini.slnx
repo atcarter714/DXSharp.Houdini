@@ -5,6 +5,9 @@
     <Project Path="src/DXSharp.Houdini.Geometry/DXSharp.Houdini.Geometry.csproj" />
     <Project Path="src/DXSharp.Houdini/DXSharp.Houdini.csproj" />
   </Folder>
-  <Folder Name="/samples/"><Project Path="samples/Diagnostics/Diagnostics.csproj" /></Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/Diagnostics/Diagnostics.csproj" />
+    <Project Path="samples/HoudiniStudio/HoudiniStudio.csproj" />
+  </Folder>
   <Folder Name="/tests/"><Project Path="tests/Verification/Verification.csproj" /></Folder>
 </Solution>

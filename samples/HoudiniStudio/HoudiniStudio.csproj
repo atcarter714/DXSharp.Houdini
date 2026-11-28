@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <!-- .NET 10 defaults may select the older .57 projection; WinUI 2.7 and DXSharp Preview 4 require CsWinRT 2.3.1. -->
+    <WindowsSdkPackageVersion>10.0.26100.87</WindowsSdkPackageVersion>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.7.0" />
+    <PackageReference Include="DXSharp.Framework.WinUI" Version="[0.4.0-preview.4]" />
+    <ProjectReference Include="../../src/DXSharp.Houdini.Geometry/DXSharp.Houdini.Geometry.csproj" />
+    <None Update="Shaders/Preview.hlsl" CopyToOutputDirectory="PreserveNewest" />
+    <ProjectReference Include="../../src/DXSharp.Houdini.Engine/DXSharp.Houdini.Engine.csproj" />
+  </ItemGroup>
+</Project>
