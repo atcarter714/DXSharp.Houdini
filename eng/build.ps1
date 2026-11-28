@@ -5,6 +5,7 @@ param(
     [string]$HoudiniVersion,
     [switch]$Native,
     [switch]$HydraProbe,
+    [string]$HoudiniPythonLibrary,
     [switch]$Locked
 )
 $ErrorActionPreference = 'Stop'
@@ -40,7 +41,8 @@ try {
         }
         if (-not $cmake) { throw 'CMake not found. Install the Visual Studio C++ CMake tools component or CMake and add it to PATH.' }
         $hydra = if ($HydraProbe) { "ON" } else { "OFF" }
-        & $cmake -S . -B $nativeDir -A x64 "-DHoudini_DIR=$configDir" "-DDXSHARP_HYDRA_PROBE=$hydra"
+        $pythonLib = if ($HoudiniPythonLibrary) { (Resolve-Path -LiteralPath $HoudiniPythonLibrary).Path } else { "" }
+        & $cmake -S . -B $nativeDir -A x64 "-DHoudini_DIR=$configDir" "-DDXSHARP_HYDRA_PROBE=$hydra" "-DDXSHARP_HOUDINI_PYTHON_LIBRARY=$pythonLib"
         & $cmake --build $nativeDir --config $Configuration
         $probe = Get-ChildItem $nativeDir -Recurse -Filter hapi_abi_probe.exe | Where-Object { $_.Directory.Name -eq $Configuration } | Select-Object -First 1
         if (-not $probe) { throw 'Native ABI probe not found.' }
